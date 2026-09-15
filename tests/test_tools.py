@@ -19,10 +19,12 @@ sys.path.insert(0, str(REPO))
 from tools.audit_tools import (  # noqa: E402
     _load,
     check_policy,
+    classify_failures,
     get_policy_summary,
     group_by_actor,
     list_failures,
 )
+from tools.policy import evaluate_policy  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -131,22 +133,67 @@ def test_group_by_actor_totals_are_consistent(sample_log: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("zone", "op", "is_admin", "is_owner", "expect"),
+    ("zone", "op", "role", "is_owner", "expect"),
     [
-        ("product", "modify", False, True, "DENY"),   # the delivery zone is immutable, even for the owner
-        ("product", "modify", True, False, "ALLOW"),  # but an admin may
-        ("work", "modify", False, True, "ALLOW"),     # you may write your own work area
-        ("work", "modify", False, False, "DENY"),     # but not somebody else's
-        ("user_profile", "delete", False, True, "ALLOW"),
-        ("work", "mkdir", False, False, "ALLOW"),     # self_bootstrap
-        ("nonsense", "modify", True, True, "UNKNOWN_ZONE"),
+        ("product", "modify", "artist", True, "DENY"),          # delivery zone is immutable, even for the owner
+        ("product", "modify", "pipeline_admin", False, "ALLOW"),  # but an admin role may
+        ("work", "modify", "artist", True, "ALLOW"),            # you may write your own work area
+        ("work", "modify", "artist", False, "DENY"),            # but not somebody else's
+        ("user_profile", "delete", "artist", True, "ALLOW"),
+        ("work", "mkdir", "artist", False, "ALLOW"),            # self_bootstrap
+        ("nonsense", "modify", "pipeline_admin", True, "UNKNOWN_ZONE"),
     ],
 )
-def test_check_policy_matrix(zone: str, op: str, is_admin: bool, is_owner: bool, expect: str) -> None:
+def test_check_policy_matrix(zone: str, op: str, role: str, is_owner: bool, expect: str) -> None:
     result = check_policy.invoke(
-        {"zone": zone, "operation": op, "is_admin": is_admin, "is_owner": is_owner}
+        {"zone": zone, "operation": op, "role": role, "is_owner": is_owner}
     )
     assert result.startswith(expect), f"{zone}/{op} expected {expect}, got {result}"
+
+
+def test_admin_is_decided_by_role_membership() -> None:
+    """A role only counts as admin if the policy lists it -- not by name resemblance."""
+    policy = json.loads((REPO / "data" / "policy_rules.json").read_text())
+    for role in policy["admin_roles"]:
+        allowed, _ = evaluate_policy("product", "modify", role, False, policy)
+        assert allowed, f"{role} is listed admin but was denied product/modify"
+    # A plausible-sounding but unlisted role must NOT get admin powers.
+    allowed, _ = evaluate_policy("product", "modify", "admin_assistant", False, policy)
+    assert not allowed, "an unlisted role must not be treated as admin"
+
+
+def test_events_carry_role_and_ownership(sample_log: Path) -> None:
+    """Grounding fields must be present on every event so verdicts need no guessing."""
+    rows = _load(str(sample_log))
+    gen = _load_generator()
+    for r in rows:
+        assert r["actor_role"] == gen.ROLE_BY_USER[r["actor"]], "actor_role must match the roster"
+        assert isinstance(r["is_owner"], bool)
+
+
+def test_generated_data_is_policy_consistent(sample_log: Path) -> None:
+    """A successful event may never be one the policy would have denied.
+
+    This is the whole point of sharing tools/policy.py: outcomes in the data and the analyst's
+    later verdicts come from one function, so they cannot contradict each other.
+    """
+    for r in _load(str(sample_log)):
+        allowed, reason = evaluate_policy(r["zone"], r["operation"], r["actor_role"], r["is_owner"])
+        if r["success"]:
+            assert allowed, f"a denied action was recorded as success: {r} ({reason})"
+
+
+def test_classify_failures_matches_independent_count(sample_log: Path) -> None:
+    """classify_failures' violation total must equal an independent policy re-evaluation."""
+    rows = [r for r in _load(str(sample_log)) if not r["success"]]
+    expected_violations = sum(
+        1
+        for r in rows
+        if not evaluate_policy(r["zone"], r["operation"], r["actor_role"], r["is_owner"])[0]
+    )
+    out = classify_failures.invoke({"log_path": str(sample_log)})
+    m = re.search(r"violations:\s*(\d+)", out)
+    assert m and int(m.group(1)) == expected_violations, out
 
 
 def test_policy_summary_mentions_every_zone() -> None:

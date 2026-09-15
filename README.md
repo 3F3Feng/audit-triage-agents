@@ -68,7 +68,8 @@ Output: a Markdown report containing an event overview, a suspicious-behaviour a
 
 | Path | Purpose |
 |---|---|
-| `tools/audit_tools.py` | LangChain `@tool` layer (deterministic computation) |
+| `tools/audit_tools.py` | LangChain `@tool` layer (deterministic computation, incl. `classify_failures`) |
+| `tools/policy.py` | The one policy engine shared by the tools and the generator (dependency-free) |
 | `agents/triage_crew.py` | CrewAI three-role sequential crew (+ the LangChain→CrewAI tool bridge) |
 | `server.py` | FastAPI service (`/health` `/policies` `/events/summary` `/triage`) |
 | `cli/src/index.ts` | TypeScript CLI (zero runtime deps: native `fetch` + `parseArgs`) |
@@ -142,17 +143,24 @@ python run.py --logs data/sample_audit_logs.jsonl --out report.md
    enumeration. `/events/summary` is deliberately an LLM-free endpoint so the model's output can
    be cross-checked against the tool layer's own figures.
 2. **The agent layer must not be a black box.** Any decision that matters — does this event
-   violate policy? — is answered by a deterministic function (`check_policy`); the agents only
-   interpret and rank. The policy table is pinned down by a parameterised test matrix in
-   `tests/test_tools.py`.
-3. **Why a service layer and a separate client?** They give the flow a real calling boundary
+   violate policy? — is answered by a deterministic function (`check_policy` / `classify_failures`);
+   the agents only interpret and rank. The policy table is pinned down by a parameterised test
+   matrix in `tests/test_tools.py`.
+3. **The verdict is grounded in the data, not guessed.** Every event carries `actor_role` and
+   `is_owner`, and `tools/policy.py` is the *single* policy engine used both to decide an event's
+   outcome when it is generated and to judge it at triage time — so the two can never disagree
+   (a test asserts no successful event is one the policy would have denied). `check_policy` takes a
+   *role*, not a pre-decided `is_admin` flag, and derives admin-ness from `policy["admin_roles"]`.
+   `classify_failures` then splits failures into genuine **violations** vs **permission errors**
+   deterministically, which is what stops raw failure counts from mis-ranking an admin as risky.
+4. **Why a service layer and a separate client?** They give the flow a real calling boundary
    instead of only running as a local script, which is what makes it triggerable by other systems
    — and containerisable — later on.
-4. **Shape of the crew.** `Agent` + `Task` + `Crew` + `Process.sequential`, with tools attached per
+5. **Shape of the crew.** `Agent` + `Task` + `Crew` + `Process.sequential`, with tools attached per
    role, is the direct analogue of hand-rolled tool registration and sub-agent delegation.
-5. **A rule hit is a candidate, not a verdict.** The pipeline ranks and explains; it never acts.
+6. **A rule hit is a candidate, not a verdict.** The pipeline ranks and explains; it never acts.
    In production that becomes alert severity tiers plus a human in the loop.
-6. **Known limits.** Synthetic data, single process, no auth, no durable job queue. Going further
+7. **Known limits.** Synthetic data, single process, no auth, no durable job queue. Going further
    would require event de-duplication, idempotency, background jobs, and auditing of the auditor
    itself.
 

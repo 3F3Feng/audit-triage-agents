@@ -13,7 +13,7 @@ from typing import Any
 
 from langchain_core.tools import tool
 
-POLICY_PATH = Path(__file__).resolve().parent.parent / "data" / "policy_rules.json"
+from .policy import evaluate_policy, load_policy
 
 
 def _load(path: str) -> list[dict[str, Any]]:
@@ -53,9 +53,10 @@ def list_failures(log_path: str, limit: int = 30) -> str:
         return "No failed events."
     out = []
     for i, r in enumerate(rows[:limit], 1):
+        owner = "owner" if r.get("is_owner") else "non-owner"
         out.append(
-            f"#{i} {r['ts']} | {r['actor']:<16} | {r['operation']:<6} | {r['zone']:<12} | "
-            f"{r['path']}\n    reason: {r.get('reason')}"
+            f"#{i} {r['ts']} | {r['actor']:<16} {('[' + str(r.get('actor_role', '?')) + ']'):<14} | "
+            f"{r['operation']:<6} | {r['zone']:<12} {owner:<9} | {r['path']}\n    reason: {r.get('reason')}"
         )
     return f"{len(rows)} failed events in total, showing the most recent {min(limit, len(rows))}:\n\n" + "\n".join(out)
 
@@ -68,7 +69,10 @@ def group_by_actor(log_path: str, only_failures: bool = True) -> str:
     for r in rows:
         if only_failures and r.get("success"):
             continue
-        s = stats.setdefault(r["actor"], {"total": 0, "fail": 0, "zones": Counter(), "ops": Counter()})
+        s = stats.setdefault(
+            r["actor"],
+            {"role": r.get("actor_role", "?"), "total": 0, "fail": 0, "zones": Counter(), "ops": Counter()},
+        )
         s["total"] += 1
         s["fail"] += 0 if r.get("success") else 1
         s["zones"][r["zone"]] += 1
@@ -76,45 +80,88 @@ def group_by_actor(log_path: str, only_failures: bool = True) -> str:
     lines = []
     for actor, s in sorted(stats.items(), key=lambda kv: -kv[1]["fail"]):
         lines.append(
-            f"{actor:<18} failures {s['fail']:>3} / total {s['total']:>3} | "
+            f"{actor:<18} [{s['role']:<13}] failures {s['fail']:>3} / total {s['total']:>3} | "
             f"zones {dict(s['zones'])} | ops {dict(s['ops'].most_common(3))}"
         )
     return "\n".join(lines) or "No matching records."
 
 
 @tool
-def check_policy(zone: str, operation: str, is_admin: bool, is_owner: bool) -> str:
+def check_policy(zone: str, operation: str, role: str, is_owner: bool) -> str:
     """Evaluate a single operation against the policy file. Returns ALLOW or DENY plus the reason.
+
+    Admin-ness is decided from the role (the policy lists which roles are admin), not passed in.
 
     Args:
         zone: product / work / user_profile
         operation: create / modify / delete / chmod / chown / mkdir
-        is_admin: whether the caller holds an admin role
+        role: the caller's role, e.g. from an event's actor_role field (see get_policy_summary
+              for which roles are admin)
         is_owner: whether the caller owns the target path
     """
-    policy = json.loads(POLICY_PATH.read_text())
-    zones = policy["zones"]
-    if zone not in zones:
+    policy = load_policy()
+    if zone not in policy["zones"]:
         return f"UNKNOWN_ZONE: {zone}"
-    rule = zones[zone]["allow"].get(operation)
-    if rule is None:
-        return f"DENY: policy does not define {operation} in zone {zone} (deny by default)"
-    if "*" in rule:
-        return f"ALLOW: zone {zone} permits {operation} for all users"
-    if "admin" in rule and is_admin:
-        return f"ALLOW: an admin role may {operation} in zone {zone}"
-    if "owner" in rule and is_owner:
-        return f"ALLOW: the owner may {operation} in zone {zone}"
-    if "self_bootstrap" in rule:
-        return "ALLOW: permitted to bootstrap one's own work directory"
-    needed = "the admin role" if "admin" in rule else "owner rights"
-    return f"DENY: {operation} in zone {zone} requires {needed}"
+    allowed, reason = evaluate_policy(zone, operation, role, is_owner, policy)
+    return f"{'ALLOW' if allowed else 'DENY'}: {reason}"
+
+
+@tool
+def classify_failures(log_path: str, limit: int = 40) -> str:
+    """Label every failed event as VIOLATION or PERMISSION_ERROR, grounded in the event's own fields.
+
+    For each failure this re-evaluates the policy from the event's actor_role + is_owner:
+      * VIOLATION        — the policy forbids the action (a genuine over-privilege attempt)
+      * PERMISSION_ERROR — the policy allows it, but it failed for another reason (e.g. POSIX bits)
+
+    The verdict comes from a deterministic function, not the LLM's judgement, so it is reproducible.
+    Returns the violation/permission-error totals, a per-actor breakdown, and violation evidence.
+    """
+    rows = [r for r in _load(log_path) if not r.get("success")]
+    if not rows:
+        return "No failed events."
+    policy = load_policy()
+
+    per_actor: dict[str, dict[str, Any]] = {}
+    violations: list[dict[str, Any]] = []
+    for r in rows:
+        allowed, _ = evaluate_policy(
+            r["zone"], r["operation"], r.get("actor_role", ""), bool(r.get("is_owner")), policy
+        )
+        label = "PERMISSION_ERROR" if allowed else "VIOLATION"
+        pa = per_actor.setdefault(
+            r["actor"], {"role": r.get("actor_role", "?"), "VIOLATION": 0, "PERMISSION_ERROR": 0}
+        )
+        pa[label] += 1
+        if label == "VIOLATION":
+            violations.append(r)
+
+    n_viol = len(violations)
+    n_perm = len(rows) - n_viol
+    lines = [
+        "failure classification (grounded in actor_role + is_owner, deterministic):",
+        f"total failures: {len(rows)} | violations: {n_viol} | permission errors: {n_perm}",
+        "",
+        "by actor (violations / permission-errors):",
+    ]
+    for actor, pa in sorted(per_actor.items(), key=lambda kv: -kv[1]["VIOLATION"]):
+        lines.append(
+            f"  {actor:<18} [{pa['role']:<13}] {pa['VIOLATION']:>3} / {pa['PERMISSION_ERROR']:>3}"
+        )
+    violations.sort(key=lambda r: r["ts"], reverse=True)
+    lines += ["", f"violations (evidence), newest first, showing up to {limit}:"]
+    for r in violations[:limit]:
+        lines.append(
+            f"  {r['ts']} | {r['actor']:<16} [{r.get('actor_role', '?')}] | "
+            f"{r['operation']:<6} | {r['zone']:<12} | {r['path']}"
+        )
+    return "\n".join(lines)
 
 
 @tool
 def get_policy_summary() -> str:
     """Return the current authorization policy so an analyst can line its findings up with policy text."""
-    policy = json.loads(POLICY_PATH.read_text())
+    policy = load_policy()
     lines = [f"policy version {policy['version']}, admin roles: {', '.join(policy['admin_roles'])}", ""]
     for zone, spec in policy["zones"].items():
         lines.append(f"[{zone}] {spec['intent']}")
@@ -126,4 +173,11 @@ def get_policy_summary() -> str:
     return "\n".join(lines)
 
 
-ALL_TOOLS = [summarize_events, list_failures, group_by_actor, check_policy, get_policy_summary]
+ALL_TOOLS = [
+    summarize_events,
+    list_failures,
+    group_by_actor,
+    check_policy,
+    classify_failures,
+    get_policy_summary,
+]

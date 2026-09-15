@@ -78,7 +78,11 @@ def build_crew(log_path: str) -> Crew:
             "strictly isolated. You know that 'failure' has two meanings -- a slipped finger, and "
             "an attempt to exceed one's rights."
         ),
-        tools=[CREW_TOOL_BY_NAME["check_policy"], CREW_TOOL_BY_NAME["get_policy_summary"]],
+        tools=[
+            CREW_TOOL_BY_NAME["classify_failures"],
+            CREW_TOOL_BY_NAME["check_policy"],
+            CREW_TOOL_BY_NAME["get_policy_summary"],
+        ],
         llm=llm,
         verbose=True,
         allow_delegation=False,
@@ -113,16 +117,20 @@ def build_crew(log_path: str) -> Crew:
     t2 = Task(
         description=(
             "Working from the factual summary above:\n"
-            "1) Call get_policy_summary to retrieve the policy baseline;\n"
-            "2) For every (zone, operation) pair that appears among the failures, call check_policy "
-            "to verify it against the policy;\n"
-            "3) Decide which failures are **clear violations of privilege** (for example a non-admin "
-            "doing modify/delete in the product zone) and which are only **mis-clicks or missing "
-            "permissions**;\n"
-            "4) Rank the actors by risk and explain the ranking criteria.\n"
-            "Never invent anything: every finding must cite its evidence (actor, operation, path, count)."
+            "1) Call get_policy_summary to retrieve the policy baseline (note which roles are admin);\n"
+            "2) Call classify_failures — it splits every failure into VIOLATION vs PERMISSION_ERROR "
+            "deterministically from each event's own actor_role and is_owner fields. Treat its "
+            "verdict and counts as ground truth; do NOT re-derive them by eye.\n"
+            "3) Use check_policy(zone, operation, role, is_owner) only to spot-check or explain a "
+            "specific case in policy terms — the role comes from the event's actor_role, so you are "
+            "never guessing whether someone is an admin or an owner;\n"
+            "4) Rank the actors by risk (violations first, then operation sensitivity like "
+            "chown/chmod/delete), and explain the ranking criteria.\n"
+            "Never invent anything: every finding must cite its evidence (actor, role, operation, "
+            "path, count). Keep VIOLATION (policy forbids it) strictly separate from "
+            "PERMISSION_ERROR (policy allows it, it failed for another reason)."
         ),
-        expected_output="List of suspicious behaviour (with evidence) + risk ranking + justification",
+        expected_output="Violations vs permission-errors (with evidence) + risk ranking + justification",
         agent=analyst,
         context=[t1],
     )
