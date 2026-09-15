@@ -12,6 +12,7 @@ from pathlib import Path
 
 from crewai import LLM, Agent, Crew, Process, Task
 from crewai.tools.base_tool import Tool as CrewTool
+from dotenv import load_dotenv
 
 from tools.audit_tools import ALL_TOOLS
 
@@ -29,6 +30,11 @@ CREW_TOOLS: list[CrewTool] = [CrewTool.from_langchain(t) for t in ALL_TOOLS]
 CREW_TOOL_BY_NAME: dict[str, CrewTool] = {t.name: t for t in CREW_TOOLS}
 
 REPO = Path(__file__).resolve().parent.parent
+
+# Load repo-root .env (endpoint / key / model) so `cp .env.example .env` just works for
+# `uvicorn server:app` and `python run.py`. Does not override vars already in the
+# environment, so an explicit `export TRIAGE_MODEL=...` still wins.
+load_dotenv(REPO / ".env")
 
 DEFAULT_BASE_URL = os.environ.get("TRIAGE_BASE_URL", "http://localhost:8080/v1")
 DEFAULT_MODEL = os.environ.get("TRIAGE_MODEL", "deepseek-flash")

@@ -88,10 +88,11 @@ Output: a Markdown report containing an event overview, a suspicious-behaviour a
 #    Self-hosted example:
 #      mlx_lm.server --model <local-model> --port 8080
 
-cp .env.example .env                # .env is gitignored
-export TRIAGE_BASE_URL=https://api.deepseek.com/v1
-export TRIAGE_API_KEY=***
-export TRIAGE_MODEL=deepseek-flash
+cp .env.example .env                # .env is gitignored; then edit it and paste your key
+#   TRIAGE_BASE_URL=https://api.deepseek.com/v1
+#   TRIAGE_API_KEY=sk-...
+#   TRIAGE_MODEL=deepseek-flash
+# The server auto-loads .env at startup (an explicit `export TRIAGE_MODEL=...` overrides it).
 
 # 2) Install (a dedicated conda env is recommended)
 conda create -n agentdemo python=3.11 -y && conda activate agentdemo
