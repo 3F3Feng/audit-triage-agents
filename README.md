@@ -173,6 +173,12 @@ python run.py --logs data/sample_audit_logs.jsonl --out report.md
   caveat is intentional and is visible in the generated report.
 - **No auth, no persistence, no queue.** Single-process and in-memory by design.
 
+## Roadmap
+
+One main line — evolving the crew's execution from a synchronous call into an explicit,
+checkpointed, resumable model (async boundary → LangGraph state graph → checkpoint/resume →
+optional Temporal) — is in [`ROADMAP.md`](ROADMAP.md).
+
 ## License
 
 MIT — see `LICENSE`.
