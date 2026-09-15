@@ -1,0 +1,24 @@
+{
+  "version": "1.0",
+  "description": "Simplified studio file-service authorization policy (for the demo; redacted and rewritten)",
+  "zones": {
+    "product": {
+      "intent": "Delivery zone: content is a deliverable and must be immutable",
+      "allow": { "create": ["*"], "modify": ["admin"], "delete": ["admin"], "chmod": ["admin"], "chown": ["admin"], "mkdir": ["*"] }
+    },
+    "work": {
+      "intent": "Work zone: everyone writes only inside their own directory",
+      "allow": { "create": ["owner"], "modify": ["owner"], "delete": ["owner"], "chmod": ["owner"], "chown": ["admin"], "mkdir": ["owner", "self_bootstrap"] }
+    },
+    "user_profile": {
+      "intent": "Personal directories: strictly isolated",
+      "allow": { "create": ["owner"], "modify": ["owner"], "delete": ["owner"], "chmod": ["owner"], "chown": ["admin"], "mkdir": ["owner"] }
+    }
+  },
+  "admin_roles": ["devops", "pipeline_admin"],
+  "notes": [
+    "A non-admin performing modify/delete/chmod/chown in the product zone is a clear policy violation, not a mis-click",
+    "The work zone allows 'self_bootstrap': a user may create their own work/<username> directory",
+    "Every failure must leave an audit record (who / when / on what / why it failed)"
+  ]
+}

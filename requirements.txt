@@ -1,0 +1,13 @@
+# Agent orchestration demo —— LangChain tools + CrewAI crew
+langchain>=0.3
+langchain-core>=0.3
+langchain-openai>=0.2
+crewai>=0.80
+pydantic>=2.7
+
+# 服务层（把 crew 暴露成一个可被外部触发的 HTTP 端点）
+fastapi>=0.115
+uvicorn>=0.32
+
+# 测试
+pytest>=8.3

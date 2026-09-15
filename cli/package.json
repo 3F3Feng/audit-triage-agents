@@ -1,0 +1,25 @@
+{
+  "name": "audit-triage-cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "TypeScript CLI that triggers the Python audit-triage crew service",
+  "license": "MIT",
+  "bin": {
+    "audit-triage": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "engines": {
+    "node": ">=20.11"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
