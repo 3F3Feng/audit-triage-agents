@@ -1,0 +1,38 @@
+# NetworkPolicy is a whitelist model: with no policy, all pod-to-pod traffic is allowed. We first
+# deny all ingress in the namespace, then open a single narrow hole to the server.
+#
+# IMPORTANT: kind's default CNI (kindnet) does NOT enforce NetworkPolicy. These objects will apply
+# but have no effect unless the cluster runs an enforcing CNI (Calico). See deploy/README.md.
+---
+# 1) Default-deny: no pod in the namespace accepts any ingress...
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: audit-triage
+spec:
+  podSelector: {}            # applies to every pod in the namespace
+  policyTypes:
+    - Ingress
+  # no ingress rules => all ingress denied
+---
+# 2) ...except: the server accepts TCP/8000 only from pods labeled role=triage-client.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-triage-clients
+  namespace: audit-triage
+spec:
+  podSelector:
+    matchLabels:
+      app: audit-triage
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              role: triage-client
+      ports:
+        - protocol: TCP
+          port: 8000

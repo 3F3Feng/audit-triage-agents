@@ -7,6 +7,9 @@ venv/
 # Credentials -- never commit these
 .env
 
+# Local planning notes: may reference employer / interview context; keep out of a public repo
+TODO_*.md
+
 *.log
 
 # Run artifacts

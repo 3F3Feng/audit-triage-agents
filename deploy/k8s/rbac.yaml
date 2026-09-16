@@ -1,0 +1,26 @@
+# Least privilege, made explicit.
+#
+# The correct RBAC answer for this workload is "almost nothing": the FastAPI service does its
+# job (parse logs, call an LLM, return a report) without ever touching the Kubernetes API. So the
+# right Role grants zero permissions. Writing it out — rather than omitting RBAC — documents the
+# decision and gives something concrete to verify (`kubectl auth can-i ... => no`).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: audit-triage-role
+  namespace: audit-triage
+rules: []   # intentionally empty: no verbs on any resource
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: audit-triage-rolebinding
+  namespace: audit-triage
+subjects:
+  - kind: ServiceAccount
+    name: audit-triage-sa
+    namespace: audit-triage
+roleRef:
+  kind: Role
+  name: audit-triage-role
+  apiGroup: rbac.authorization.k8s.io
