@@ -2,6 +2,33 @@
 
 **Synthetic-data prototype notice:** This report is based entirely on synthetic data and is a process prototype. It is not a production security determination, employment decision, or confirmed-incident report.
 
+> ### ⚠ Captured sample — read before quoting any figure below
+>
+> This file is a **captured** crew run from the prototype's first commit (`430af5f`), kept as an
+> illustration of the report's shape and reasoning style. It is not regenerated with the code, and two
+> later commits have moved past it:
+>
+> - `65811c2` gave `check_policy` a **role** rather than a pre-decided `is_admin` flag, and added
+>   `classify_failures` — a tool this run never called.
+> - `e626b8b` tightened `self_bootstrap`: a `work` `mkdir` is now allowed only in the caller's **own**
+>   directory. It also rewrote the generator's denial reasons to follow the rule that actually
+>   refused, so the string “Path is outside the permitted zone for this caller” is no longer emitted
+>   at all.
+>
+> **Every count, per-actor total and sampled event below belongs to a dataset the current generator no
+> longer produces.** A denied event skips the generator's sporadic-permission-error roll, so tightening
+> the policy changed how many random draws each event consumes — and with it the whole seeded event
+> stream. `data/sample_audit_logs.jsonl` is a run artefact rather than a committed file, so none of
+> these figures can be reproduced from this repository, and regenerating the narrative would need a
+> live model endpoint.
+>
+> What has been done instead: the statements of **policy and tool behaviour** — the reason list in
+> §2.3 and the tables in §3.2 and §3.3 — are hand-corrected against the current code, each one checked
+> by actually running `check_policy`, `classify_failures` and the generator. The **captured figures and
+> the model's own prose are left as they were**; a `†` marks each place (§3.4, §3.5, §3.6, §4.1, §5.3)
+> where a note in italics says what the current code would produce instead. Read the numbers as
+> illustrative, not current.
+
 ---
 
 ## 1. Executive summary
@@ -78,8 +105,13 @@ Failures summed across actors — source: `group_by_actor`:
   - “Caller group not permitted for this zone”
   - “lack corresponding POSIX write permission bits on the file/folder”
   - “Caller does not own the target path”
-  - “Path is outside the permitted zone for this caller”
   - “Product area is read-only. Modifications and deletions are not allowed.”
+
+> **Corrected against the current generator.** This capture also listed “Path is outside the permitted
+> zone for this caller”. That string is gone: since `e626b8b` a denial is reported by the rule that
+> actually refused it, so an admin-gated operation now reads “Operation `<op>` in zone `<zone>`
+> requires an admin role”. Regenerating at the default seed yields exactly five reason forms — the four
+> above, plus that admin-role form.
 
 No conclusions are drawn in this data-overview section; all figures are attributed to the tool call that produced them.
 
@@ -112,26 +144,35 @@ Policy notes:
 
 **Source:** `check_policy`
 
-| Zone | Operation | is_admin | is_owner | Result | Reason |
-|---|---|---|---|---|---|
-| product | create | false | false | **ALLOW** | permits create for all users |
-| product | mkdir | false | false | **ALLOW** | permits mkdir for all users |
-| product | modify | false | false | **DENY** | requires the admin role |
-| product | delete | false | false | **DENY** | requires the admin role |
-| product | chmod | false | false | **DENY** | requires the admin role |
-| product | chown | false | false | **DENY** | requires the admin role |
-| work | create | false | true | ALLOW | owner may create |
-| work | mkdir | false | true | ALLOW | owner may mkdir (self_bootstrap) |
-| work | modify | false | true | ALLOW | owner may modify |
-| work | delete | false | true | ALLOW | owner may delete |
-| work | chmod | false | true | ALLOW | owner may chmod |
-| work | chown | false | true | **DENY** | requires the admin role |
-| work | create | false | false | **DENY** | requires owner rights |
-| work | mkdir | false | false | ALLOW | permitted to bootstrap one’s own work dir |
-| user_profile | create/modify/delete/chmod/mkdir | false | true | ALLOW | owner may operate in own profile |
-| user_profile | chown | false | true | **DENY** | requires the admin role |
+| Zone | Operation | role | is_owner | Target path | Result | Reason |
+|---|---|---|---|---|---|---|
+| product | create | contractor | false | — | **ALLOW** | zone product permits create for all users |
+| product | mkdir | contractor | false | — | **ALLOW** | zone product permits mkdir for all users |
+| product | modify | contractor | false | — | **DENY** | requires an admin role |
+| product | delete | coordinator | false | — | **DENY** | requires an admin role |
+| product | chmod | contractor | false | — | **DENY** | requires an admin role |
+| product | chown | lighting_td | false | — | **DENY** | requires an admin role |
+| work | create | artist | true | own | ALLOW | the owner may create in zone work |
+| work | mkdir | artist | true | own | ALLOW | the owner may mkdir in zone work |
+| work | modify | artist | true | own | ALLOW | the owner may modify in zone work |
+| work | delete | artist | true | own | ALLOW | the owner may delete in zone work |
+| work | chmod | artist | true | own | ALLOW | the owner may chmod in zone work |
+| work | chown | artist | true | own | **DENY** | requires an admin role |
+| work | create | artist | false | another user’s | **DENY** | requires owner rights |
+| work | mkdir | artist | false | **own** | ALLOW | the caller may bootstrap their own directory |
+| work | mkdir | artist | false | **another user’s** | **DENY** | may only bootstrap one’s own directory |
+| user_profile | create/modify/delete/chmod/mkdir | artist | true | own | ALLOW | the owner may operate in own profile |
+| user_profile | chown | artist | true | own | **DENY** | requires an admin role |
 
 Every pair that appears among the failures has been checked against the live policy.
+
+> **Corrected against the current tool.** Two things changed after this capture. `check_policy` no
+> longer takes an `is_admin` flag — it takes a **role** and derives admin-ness from
+> `policy["admin_roles"]` — so that column is now `role`. And a `work` `mkdir` by a non-owner is no
+> longer an unconditional ALLOW: since `e626b8b`, `self_bootstrap` grants only when the path's owner
+> segment equals the caller, which is why the single row this capture had is now **two** rows with
+> opposite verdicts. Without a caller and a path to compare, `check_policy` denies rather than guesses.
+> Every row above was re-run against the current engine.
 
 ---
 
@@ -139,13 +180,24 @@ Every pair that appears among the failures has been checked against the live pol
 
 | Audit reason string | What it means against policy | Category |
 |---|---|---|
-| “Product area is read-only. Modifications and deletions are not allowed.” | Matches the admin-gated verbs in product | **Violation** |
-| “Path is outside the permitted zone for this caller” | Caller reaching into a zone they don’t belong to | **Violation** |
-| “Caller does not own the target path” | Owner-only rule (work/user_profile) hit by a non-owner | Borderline / missing permission |
-| “lack corresponding POSIX write permission bits on the file/folder” | A **filesystem** permission gap, not necessarily a policy gap — policy may still ALLOW | **Mis-click / missing permission** * |
-| “Caller group not permitted for this zone” | Group-level provisioning gap; the op itself may be policy-ALLOW | **Mis-click / missing permission** |
+| “Product area is read-only. Modifications and deletions are not allowed.” | Any denial in product — in practice, the admin-gated verbs | **Violation** |
+| “Operation `<op>` in zone `<zone>` requires an admin role” | An admin-gated verb (`work`/`user_profile` `chown`) attempted by a non-admin | **Violation** |
+| “Caller does not own the target path” | Owner-only rule (work/user_profile) hit by a non-owner, **and** a cross-user `work` `mkdir` | **Violation** |
+| “lack corresponding POSIX write permission bits on the file/folder” | A **filesystem** permission gap on an operation the policy allows | **Mis-click / missing permission** * |
+| “Caller group not permitted for this zone” | Group-level provisioning gap on an operation the policy allows | **Mis-click / missing permission** |
 
-\* Important trap: for an **admin-gated product verb**, the “POSIX bits” wording is only technical noise — the *operation* is the violation.
+\* The two permission-error reasons are only ever attached to an operation the policy **allowed**: the generator reaches for them in the branch after the policy verdict, so no policy-denied event can carry one. Verified by regenerating and re-classifying — zero denied events carry either string.
+
+> **Corrected against the current generator and `classify_failures`.** The row for “Path is outside the
+> permitted zone for this caller” is replaced by the admin-role reason that supersedes it. The
+> ownership row moves from *Borderline / missing permission* to **Violation**: `classify_failures`
+> labels every event carrying that string `VIOLATION`, and since `e626b8b` the string also covers a
+> `work` `mkdir` into someone else's directory, which used to be generated as a success. The
+> “important trap” footnote is likewise corrected — the pairing it warned about (a POSIX reason on an
+> admin-gated product verb) is one the generator has never produced, so **samples #4 and #10 in §3.4
+> are the model's own inference, not captured data**. Judging by operation-versus-zone rather than by
+> the reason string is still the right instinct; `classify_failures` now does exactly that,
+> deterministically.
 
 ---
 
@@ -153,18 +205,33 @@ Every pair that appears among the failures has been checked against the live pol
 
 **Source for events:** `list_failures`. **Source for verdicts:** `check_policy`.
 
+> **The rows below are left exactly as captured** — correcting them would mean inventing events, since
+> the dataset they came from is not reproducible. Four rows are marked `†` because the current code
+> would not produce them as written:
+>
+> - **#4, #10** — a policy-denied product verb carrying “lack POSIX write bits”. The generator attaches
+>   a permission-error reason only to operations the policy allowed, so these two reason strings were
+>   the model's inference rather than the log's text. The generator's actual line for any product-zone
+>   denial is “Product area is read-only. Modifications and deletions are not allowed.”
+> - **#8** — same correction: a product-zone `chown` denial reads “Product area is read-only…”, never
+>   “Path is outside the permitted zone for this caller”, which `e626b8b` removed outright.
+> - **#6** — a cross-user `work` `mkdir` is now a **DENY**, not `owner/self_bootstrap`, and
+>   `classify_failures` labels it `VIOLATION`. The “borderline” reading was a consequence of the bug
+>   `e626b8b` fixed. The sample totals below, and the counts that depend on them in §1, §3.6 and §3.7,
+>   are left at the captured values rather than silently re-derived.
+
 | # | Actor | Action / Op | Zone | Path | Audit reason | Policy verdict | Triage |
 |---:|---|---|---|---|---|---|---|
 | 1 | temp_contractor | mkdir | product | `/studio/design/SHOWB/product/v1/scene` | Caller group not permitted | ALLOW (`mkdir→*`) | **Mis-click / missing perm** |
 | 2 | temp_contractor | create | product | `/studio/television/SHOWA/product/v1/scene` | Caller group not permitted | ALLOW (`create→*`) | **Mis-click / missing perm** |
 | 3 | m.philip | create | work | `/studio/television/devrnd/sequence/SHOWA/work/m.philip/scene` | lack POSIX write bits | ALLOW (owner) | **Mis-click / missing perm** |
-| 4 | m.philip | delete | product | `/studio/film/SHOWA/product/v1/scene` | lack POSIX write bits | **DENY (admin only)** | **Clear violation** |
+| 4 † | m.philip | delete | product | `/studio/film/SHOWA/product/v1/scene` | lack POSIX write bits | **DENY (admin only)** | **Clear violation** |
 | 5 | temp_contractor | modify | work | `…/work/temp_contractor/scene` | lack POSIX write bits | ALLOW (owner) | **Mis-click / missing perm** |
-| 6 | a.chen | mkdir | work | `/studio/design/devrnd/sequence/SHOWA/work/a.chen/scene` | Caller does not own target path | owner/self_bootstrap | **Borderline (owner mismatch)** |
+| 6 † | a.chen | mkdir | work | `/studio/design/devrnd/sequence/SHOWA/work/a.chen/scene` | Caller does not own target path | owner/self_bootstrap | **Borderline (owner mismatch)** |
 | 7 | m.philip | delete | work | `…/work/m.philip/scene` | lack POSIX write bits | ALLOW (owner) | **Mis-click / missing perm** |
-| 8 | temp_contractor | chown | product | `/studio/television/SHOWA/product/v1/scene` | Path outside permitted zone | **DENY (admin only)** | **Clear violation** |
+| 8 † | temp_contractor | chown | product | `/studio/television/SHOWA/product/v1/scene` | Path outside permitted zone | **DENY (admin only)** | **Clear violation** |
 | 9 | temp_contractor | chmod | product | `/studio/television/SHOWB/product/v1/scene` | Product area is read-only | **DENY (admin only)** | **Clear violation** |
-| 10 | h.cassidy | chown | product | `/studio/design/SHOWB/product/v1/scene` | lack POSIX write bits | **DENY (admin only)** | **Clear violation** |
+| 10 † | h.cassidy | chown | product | `/studio/design/SHOWB/product/v1/scene` | lack POSIX write bits | **DENY (admin only)** | **Clear violation** |
 
 **Totals in the documented sample:** **4 clear violations, 5 mis-clicks/missing permissions, 1 borderline.**
 
@@ -180,18 +247,18 @@ These are non-admins invoking an **admin-gated verb** in the immutable **product
   - Policy basis: product `chmod` requires **admin**.
 
 - **temp_contractor — `chown` on product** `/studio/television/SHOWA/product/v1/scene`  
-  - Evidence: sample **#8**  
-  - Audit reason: “Path is outside the permitted zone for this caller”  
-  - Policy basis: product `chown` requires **admin**.
+  - Evidence: sample **#8** †  
+  - Audit reason: “Path is outside the permitted zone for this caller” — *this string no longer exists; the generator's line for any product-zone denial is “Product area is read-only. Modifications and deletions are not allowed.”*  
+  - Policy basis: product `chown` requires **admin**. (Unchanged, and still the point: the verdict never rested on the reason text.)
 
 - **m.philip — `delete` on product** `/studio/film/SHOWA/product/v1/scene`  
-  - Evidence: sample **#4**  
-  - Audit reason: “lack POSIX write bits”  
-  - Policy basis: product `delete` requires **admin**. The reason text is misleading; the verb itself is admin-only.
+  - Evidence: sample **#4** †  
+  - Audit reason: “lack POSIX write bits” — *a permission-error reason is only ever attached to an operation the policy allowed, so a denied product `delete` cannot carry this string; see §3.4.*  
+  - Policy basis: product `delete` requires **admin**. The verb itself is admin-only.
 
 - **h.cassidy — `chown` on product** `/studio/design/SHOWB/product/v1/scene`  
-  - Evidence: sample **#10**  
-  - Audit reason: “lack POSIX write bits”  
+  - Evidence: sample **#10** †  
+  - Audit reason: “lack POSIX write bits” — *same correction as #4.*  
   - Policy basis: product `chown` requires **admin**.
 
 Structural policy-level violations to watch wherever they occur:
@@ -215,10 +282,10 @@ The caller attempted something the policy **would allow**, and it failed for env
   - Policy: ALLOW (owner).  
   - Failed only on “lack POSIX write permission bits” → **filesystem permissions**, not authorization.
 
-- **a.chen — `mkdir` in work** (sample **#6**)  
+- **a.chen — `mkdir` in work** (sample **#6**) †  
   - Audit reason: “Caller does not own the target path.”  
-  - `work mkdir` is allowed for owner/self_bootstrap.  
-  - Triage: **borderline ownership mismatch**, most consistent with a path typo rather than an attempt to seize another user’s area. This is the one work-zone event worth a second look.
+  - **Corrected:** `work mkdir` is allowed for the **owner**, or under `self_bootstrap` for the caller's **own** `work/<username>` directory only. Since `e626b8b` a `mkdir` into another user's directory is a **DENY**, and `classify_failures` labels it `VIOLATION`.  
+  - Triage as captured: **borderline ownership mismatch**, read as a path typo rather than an attempt to seize another user’s area. Under the current policy this reading no longer holds — a cross-user `mkdir` is a violation, not a borderline case. It remains the one work-zone event worth a second look, for the opposite reason.
 
 **Category counts (documented sample):** Clear violations = **4**; Mis-click/missing-permission = **5**; Borderline = **1**.
 
@@ -265,7 +332,7 @@ The caller attempted something the policy **would allow**, and it failed for env
   - `check_policy` returns ALLOW for `product create` and `product mkdir`, but the gateway denied with “Caller group not permitted.”  
   - This is a **group-provisioning / policy-enforcement mismatch**, not a privilege violation by the actor, but it should be reconciled urgently because it creates noisy failures and masks real violations.
 
-- **Review a.chen’s work-zone ownership mismatch** (sample **#6**) as a possible path typo or self-bootstrap edge case.
+- **Review a.chen’s work-zone ownership mismatch** (sample **#6**) † as a possible path typo or self-bootstrap edge case. — *Under the current policy this is a plain violation rather than an edge case; see §3.6.*
 
 ### 4.2 Training
 
@@ -301,6 +368,8 @@ The caller attempted something the policy **would allow**, and it failed for env
 | `get_policy_summary` | Policy v1.0 baseline: roles, zones, allowed operations |
 | `check_policy` | Verdicts for each (zone, operation) pair seen among failures |
 
+`classify_failures` — the deterministic VIOLATION / PERMISSION_ERROR split — did not exist when this run was captured. A current run has it available, and it is the tool that settles the §3.3 and §3.4 questions above without the model having to reason from reason strings.
+
 ### 5.2 Data range and source
 
 - **Source file:** `data/sample_audit_logs.jsonl`
@@ -313,7 +382,7 @@ The caller attempted something the policy **would allow**, and it failed for env
 - **Synthetic data and process prototype.** This report is not a production incident report. Actor names are synthetic labels.
 - **Sample limitation:** `list_failures` returned only the **10 most recent** of **50** failures. Therefore the “4 clear / 5 mis-click / 1 borderline” split is exact **for the documented sample**, not necessarily for all 50 failures.
 - **Aggregation limitation:** `group_by_actor` gives **op mix totals, not per-op failure counts**. The per-actor risk ranking uses the documented sample plus aggregate totals and does **not** invent per-actor violation counts beyond what the sample shows.
-- **Reason-text caveat:** “lack corresponding POSIX write permission bits” appears on genuine violations (**#4, #10**). Analysts must judge by the **operation vs the zone policy**, not by the audit reason string alone.
+- **Reason-text caveat:** “lack corresponding POSIX write permission bits” appears on genuine violations (**#4, #10**). Analysts must judge by the **operation vs the zone policy**, not by the audit reason string alone. — *Corrected: the generator never attaches a permission-error reason to a policy-denied event, so that pairing was the model's inference (see §3.3 and §3.4). The instinct is right, and `classify_failures` now applies it deterministically; the two samples are not evidence for it.*
 - **Flagged inconsistency, not an actor finding:** temp_contractor’s product `create`/`mkdir` denials (**#1, #2**) contradict `check_policy` returning ALLOW for `product create`/`mkdir`. This is a group-provisioning / policy-enforcement mismatch worth configuration review.
 - **No intent determination:** this report identifies policy violations and suspicious patterns; it does not establish motive or actual data exfiltration/damage.
 - **Traceability:** all actor/failure counts are from `group_by_actor`; zone/op totals from `summarize_events`; detailed events from `list_failures`; policy text from `get_policy_summary`; verdicts from `check_policy`.
