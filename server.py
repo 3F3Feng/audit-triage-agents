@@ -19,7 +19,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from agents.triage_crew import DEFAULT_BASE_URL, DEFAULT_MODEL, build_crew
-from tools.audit_tools import _load
+from tools.audit_tools import AuditLogError, _load, time_window
 
 REPO = Path(__file__).resolve().parent
 
@@ -60,8 +60,19 @@ def _stats(log_path: Path) -> dict[str, Any]:
         "top_actors_by_failure": dict(
             Counter(r["actor"] for r in fails).most_common(5)
         ),
-        "window": [rows[0]["ts"], rows[-1]["ts"]] if rows else [],
+        "window": list(time_window(rows)) if rows else [],
     }
+
+
+def _stats_or_400(log_path: Path) -> dict[str, Any]:
+    """Read and summarize a log, turning a malformed one into a 4xx the caller can act on.
+
+    A bad log is the caller's input, not a server fault, so it must not surface as a 500.
+    """
+    try:
+        return _stats(log_path)
+    except AuditLogError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/health")
@@ -85,7 +96,7 @@ def events_summary(logs: str = "data/sample_audit_logs.jsonl") -> dict[str, Any]
     log_path = _resolve(logs)
     if not log_path.exists():
         raise HTTPException(status_code=404, detail=f"log not found: {log_path}")
-    return _stats(log_path)
+    return _stats_or_400(log_path)
 
 
 @app.post("/triage", response_model=TriageResponse)
@@ -93,6 +104,9 @@ def triage(req: TriageRequest) -> TriageResponse:
     log_path = _resolve(req.logs)
     if not log_path.exists():
         raise HTTPException(status_code=404, detail=f"log not found: {log_path}")
+    # Validate before spending a model call: a log the tools cannot read would only fail later,
+    # after the crew has already run.
+    stats = _stats_or_400(log_path)
 
     started = time.perf_counter()
     try:
@@ -114,6 +128,6 @@ def triage(req: TriageRequest) -> TriageResponse:
     return TriageResponse(
         report=report,
         elapsed_seconds=round(elapsed, 2),
-        stats=_stats(log_path),
+        stats=stats,
         report_path=str(out_path) if out_path else None,
     )

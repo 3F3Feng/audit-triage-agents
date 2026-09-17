@@ -16,24 +16,70 @@ from langchain_core.tools import tool
 from .policy import evaluate_policy, load_policy
 
 
+#: Fields every tool below indexes directly. A row missing one of these cannot be reasoned about,
+#: so it is rejected at load time with a message naming the line -- rather than surfacing later as
+#: a KeyError from somewhere deep in a report.
+REQUIRED_FIELDS = ("ts", "operation", "actor", "zone", "path")
+
+
+class AuditLogError(ValueError):
+    """An audit log could not be read: malformed JSON, or a row missing a required field.
+
+    Distinct from FileNotFoundError so the service layer can tell "you sent me bad input" (4xx)
+    apart from "that file isn't here" (404) and from a genuine internal fault (5xx).
+    """
+
+
 def _load(path: str) -> list[dict[str, Any]]:
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(f"audit log not found: {p}")
-    return [json.loads(line) for line in p.read_text().splitlines() if line.strip()]
+    rows: list[dict[str, Any]] = []
+    for lineno, line in enumerate(p.read_text().splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise AuditLogError(f"{p.name} line {lineno}: not valid JSON ({exc.msg})") from exc
+        if not isinstance(row, dict):
+            raise AuditLogError(
+                f"{p.name} line {lineno}: expected a JSON object, got {type(row).__name__}"
+            )
+        missing = [f for f in REQUIRED_FIELDS if f not in row]
+        if missing:
+            raise AuditLogError(
+                f"{p.name} line {lineno}: missing required field(s): {', '.join(missing)}"
+            )
+        rows.append(row)
+    return rows
+
+
+def time_window(rows: list[dict[str, Any]]) -> tuple[str, str]:
+    """Earliest and latest timestamp in ``rows``, whatever order they arrive in.
+
+    Audit logs are not guaranteed sorted (merged shards, concurrent writers), and taking the
+    first and last row on faith yields a window that runs backwards. ISO-8601 UTC stamps sort
+    lexicographically, which is also how list_failures orders its output.
+    """
+    stamps = [r["ts"] for r in rows]
+    return min(stamps), max(stamps)
 
 
 @tool
 def summarize_events(log_path: str, top_n: int = 5) -> str:
     """Summarize the overall shape of an audit log: totals, successes/failures, operation mix, busiest actors."""
     rows = _load(log_path)
+    if not rows:
+        return "No events."
     ops = Counter(r["operation"] for r in rows)
     actors = Counter(r["actor"] for r in rows)
     fails = [r for r in rows if not r.get("success")]
+    first, last = time_window(rows)
     lines = [
         f"total events: {len(rows)}",
         f"failures: {len(fails)} ({len(fails) / max(len(rows), 1):.1%})",
-        f"time range: {rows[0]['ts']} -> {rows[-1]['ts']}",
+        f"time range: {first} -> {last}",
         "",
         "operations:",
         *[f"  - {k}: {v}" for k, v in ops.most_common()],
@@ -87,7 +133,14 @@ def group_by_actor(log_path: str, only_failures: bool = True) -> str:
 
 
 @tool
-def check_policy(zone: str, operation: str, role: str, is_owner: bool) -> str:
+def check_policy(
+    zone: str,
+    operation: str,
+    role: str,
+    is_owner: bool,
+    actor: str = "",
+    path: str = "",
+) -> str:
     """Evaluate a single operation against the policy file. Returns ALLOW or DENY plus the reason.
 
     Admin-ness is decided from the role (the policy lists which roles are admin), not passed in.
@@ -98,11 +151,16 @@ def check_policy(zone: str, operation: str, role: str, is_owner: bool) -> str:
         role: the caller's role, e.g. from an event's actor_role field (see get_policy_summary
               for which roles are admin)
         is_owner: whether the caller owns the target path
+        actor: the calling user, from an event's actor field. Pass it together with path for
+               work-zone mkdir, where the policy allows bootstrapping one's *own* directory only.
+        path: the target path, from an event's path field (see actor)
     """
     policy = load_policy()
     if zone not in policy["zones"]:
         return f"UNKNOWN_ZONE: {zone}"
-    allowed, reason = evaluate_policy(zone, operation, role, is_owner, policy)
+    allowed, reason = evaluate_policy(
+        zone, operation, role, is_owner, policy, actor=actor or None, path=path or None
+    )
     return f"{'ALLOW' if allowed else 'DENY'}: {reason}"
 
 
@@ -126,7 +184,8 @@ def classify_failures(log_path: str, limit: int = 40) -> str:
     violations: list[dict[str, Any]] = []
     for r in rows:
         allowed, _ = evaluate_policy(
-            r["zone"], r["operation"], r.get("actor_role", ""), bool(r.get("is_owner")), policy
+            r["zone"], r["operation"], r.get("actor_role", ""), bool(r.get("is_owner")), policy,
+            actor=r["actor"], path=r["path"],
         )
         label = "PERMISSION_ERROR" if allowed else "VIOLATION"
         pa = per_actor.setdefault(

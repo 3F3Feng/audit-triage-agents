@@ -48,6 +48,7 @@ Output: a Markdown report containing an event overview, a suspicious-behaviour a
                               │  · list_failures              │
                               │  · group_by_actor             │
                               │  · check_policy               │
+                              │  · classify_failures          │
                               │  · get_policy_summary         │
                               └──────────────┬────────────────┘
                                              │ tool calls

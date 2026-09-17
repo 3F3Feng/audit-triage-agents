@@ -84,8 +84,9 @@ each stage is measurable, not just runnable.
 Small, independent items; some get partly absorbed by the stages above (report persistence and
 idempotency fall out of Stage 3's checkpoint store).
 
-- **Tighten `self_bootstrap`** so a `work` `mkdir` is allowed only in *your own* directory — a
-  one-line change in `tools/policy.py` plus a test row.
+- ~~**Tighten `self_bootstrap`** so a `work` `mkdir` is allowed only in *your own* directory.~~
+  Done: `evaluate_policy` now takes the caller and target path and compares the path's owner
+  segment against the caller.
 - **Auth on the service** — an API-key/bearer check on `/triage` and its status route.
 - **Pin `requirements.txt`** (`pip freeze`) so a fresh clone is reproducible; unpinned drift is
   what caused the `deepseek-chat` / tool-adapter surprises.

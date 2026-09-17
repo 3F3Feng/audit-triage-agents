@@ -1,7 +1,7 @@
 # Agent orchestration demo —— LangChain tools + CrewAI crew
-langchain>=0.3
+# Only langchain-core is imported (the @tool decorator); the langchain and langchain-openai
+# umbrella packages are not used — crewai owns the model client.
 langchain-core>=0.3
-langchain-openai>=0.2
 crewai>=0.80
 pydantic>=2.7
 python-dotenv>=1.0   # triage_crew loads .env explicitly; don't rely on it arriving transitively
@@ -12,3 +12,4 @@ uvicorn>=0.32
 
 # 测试
 pytest>=8.3
+httpx>=0.27          # fastapi.testclient.TestClient needs it; tests/test_server.py drives the routes
