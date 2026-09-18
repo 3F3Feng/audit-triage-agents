@@ -48,12 +48,20 @@ POSIX_FAILURE_REASONS = [
 ]
 
 
-def _violation_reason(zone: str, is_owner: bool) -> str:
+def _violation_reason(zone: str, operation: str, is_owner: bool) -> str:
+    """The audit line a denial would leave behind — grounded in why the policy actually refused.
+
+    The rule for the operation is consulted rather than guessed at, so an owner denied an
+    admin-only operation (work/chown, say) is not mislabelled as reaching outside their zone.
+    """
+    rule = _POLICY["zones"][zone]["allow"].get(operation, [])
     if zone == "product":
         return "Product area is read-only. Modifications and deletions are not allowed."
+    if "admin" in rule:
+        return f"Operation {operation} in zone {zone} requires an admin role"
     if not is_owner:
         return "Caller does not own the target path"
-    return "Path is outside the permitted zone for this caller"
+    return f"Operation {operation} is not permitted in zone {zone}"
 
 
 def make_event(ts: datetime, user: str) -> dict:
@@ -77,9 +85,9 @@ def make_event(ts: datetime, user: str) -> dict:
 
     # Outcome is decided by the shared policy engine: a denied action fails as a violation; an
     # allowed action mostly succeeds but occasionally hits a sporadic permission error.
-    allowed, _ = evaluate_policy(zone, op, role, is_owner, _POLICY)
+    allowed, _ = evaluate_policy(zone, op, role, is_owner, _POLICY, actor=user, path=path)
     if not allowed:
-        outcome, reason = "failure", _violation_reason(zone, is_owner)
+        outcome, reason = "failure", _violation_reason(zone, op, is_owner)
     elif random.random() < 0.05:
         outcome, reason = "failure", random.choice(POSIX_FAILURE_REASONS)
     else:

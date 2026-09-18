@@ -17,14 +17,16 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 from tools.audit_tools import (  # noqa: E402
+    AuditLogError,
     _load,
     check_policy,
     classify_failures,
     get_policy_summary,
     group_by_actor,
     list_failures,
+    summarize_events,
 )
-from tools.policy import evaluate_policy  # noqa: E402
+from tools.policy import evaluate_policy, owner_of_path  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -117,6 +119,84 @@ def _load_generator():
     return gen
 
 
+def _event(ts: str, **over) -> dict:
+    row = {
+        "ts": ts, "operation": "create", "actor": "a.chen", "actor_role": "artist",
+        "zone": "work", "path": "/studio/film/devrnd/sequence/SHOWA/work/a.chen/scene",
+        "is_owner": True, "success": True, "reason": None,
+    }
+    row.update(over)
+    return row
+
+
+def _write_log(path: Path, rows: list[dict]) -> str:
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    return str(path)
+
+
+def test_summarize_events_totals_match_raw(sample_log: Path) -> None:
+    rows = _load(str(sample_log))
+    out = summarize_events.invoke({"log_path": str(sample_log)})
+    assert f"total events: {len(rows)}" in out
+    assert f"failures: {sum(1 for r in rows if not r['success'])} " in out
+
+
+def test_summarize_events_time_range_is_ordered(tmp_path: Path) -> None:
+    """Out-of-order input must not produce a window that runs backwards (see list_failures,
+    which has always sorted -- the two must agree)."""
+    log = _write_log(tmp_path / "unsorted.jsonl", [
+        _event("2026-01-02T00:00:00Z"),
+        _event("2026-01-01T00:00:00Z"),
+        _event("2026-01-03T00:00:00Z"),
+    ])
+    out = summarize_events.invoke({"log_path": log})
+    assert "time range: 2026-01-01T00:00:00Z -> 2026-01-03T00:00:00Z" in out
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [summarize_events, list_failures, group_by_actor, classify_failures],
+)
+def test_tools_handle_an_empty_log(tool, tmp_path: Path) -> None:
+    """Every log-reading tool must answer an empty log in words, not raise.
+
+    summarize_events used to be the odd one out: it indexed rows[0] and raised IndexError while
+    its siblings returned a message.
+    """
+    empty = tmp_path / "empty.jsonl"
+    empty.write_text("")
+    out = tool.invoke({"log_path": str(empty)})
+    assert isinstance(out, str) and out.strip(), f"{tool.name} returned nothing for an empty log"
+
+
+def test_load_reports_the_line_of_malformed_json(tmp_path: Path) -> None:
+    bad = tmp_path / "bad.jsonl"
+    bad.write_text(json.dumps(_event("2026-01-01T00:00:00Z")) + "\n{ not json }\n")
+    with pytest.raises(AuditLogError, match="line 2"):
+        _load(str(bad))
+
+
+def test_load_rejects_a_row_missing_a_required_field(tmp_path: Path) -> None:
+    """Tools index these fields directly, so a row without them must fail loudly at load time."""
+    row = _event("2026-01-01T00:00:00Z")
+    del row["operation"]
+    with pytest.raises(AuditLogError, match="operation"):
+        _load(_write_log(tmp_path / "missing.jsonl", [row]))
+
+
+def test_load_rejects_a_non_object_row(tmp_path: Path) -> None:
+    bad = tmp_path / "scalar.jsonl"
+    bad.write_text("[1, 2, 3]\n")
+    with pytest.raises(AuditLogError, match="JSON object"):
+        _load(str(bad))
+
+
+def test_load_still_raises_file_not_found(tmp_path: Path) -> None:
+    """A missing file stays FileNotFoundError -- the service maps that to 404, not 400."""
+    with pytest.raises(FileNotFoundError):
+        _load(str(tmp_path / "nope.jsonl"))
+
+
 def test_summarize_counts_match_raw(sample_log: Path) -> None:
     rows = _load(str(sample_log))
     raw_fails = sum(1 for r in rows if not r.get("success"))
@@ -140,7 +220,6 @@ def test_group_by_actor_totals_are_consistent(sample_log: Path) -> None:
         ("work", "modify", "artist", True, "ALLOW"),            # you may write your own work area
         ("work", "modify", "artist", False, "DENY"),            # but not somebody else's
         ("user_profile", "delete", "artist", True, "ALLOW"),
-        ("work", "mkdir", "artist", False, "ALLOW"),            # self_bootstrap
         ("nonsense", "modify", "pipeline_admin", True, "UNKNOWN_ZONE"),
     ],
 )
@@ -149,6 +228,37 @@ def test_check_policy_matrix(zone: str, op: str, role: str, is_owner: bool, expe
         {"zone": zone, "operation": op, "role": role, "is_owner": is_owner}
     )
     assert result.startswith(expect), f"{zone}/{op} expected {expect}, got {result}"
+
+
+@pytest.mark.parametrize(
+    ("actor", "path", "expect"),
+    [
+        # self_bootstrap lets a user create their *own* work directory before they own it ...
+        ("a.chen", "/studio/film/devrnd/sequence/SHOWA/work/a.chen/scene", "ALLOW"),
+        # ... and that is the whole of the grant: another user's directory is still off limits.
+        ("a.chen", "/studio/film/devrnd/sequence/SHOWA/work/j.goran/scene", "DENY"),
+    ],
+)
+def test_self_bootstrap_only_covers_ones_own_directory(actor: str, path: str, expect: str) -> None:
+    """work/mkdir is decided by who the target path belongs to, not merely by the rule existing.
+
+    Both cases carry is_owner=False -- that is what makes them bootstrap cases at all. The
+    difference is the owner segment of the path, so a grant meant for setting up your own area
+    cannot be read as permission to write into somebody else's.
+    """
+    result = check_policy.invoke(
+        {"zone": "work", "operation": "mkdir", "role": "artist", "is_owner": False,
+         "actor": actor, "path": path}
+    )
+    assert result.startswith(expect), f"work/mkdir on {path} expected {expect}, got {result}"
+
+
+def test_self_bootstrap_denies_when_the_target_is_unknown() -> None:
+    """With no caller/path to check against, the rule must deny rather than assume the best."""
+    result = check_policy.invoke(
+        {"zone": "work", "operation": "mkdir", "role": "contractor", "is_owner": False}
+    )
+    assert result.startswith("DENY"), result
 
 
 def test_admin_is_decided_by_role_membership() -> None:
@@ -178,9 +288,28 @@ def test_generated_data_is_policy_consistent(sample_log: Path) -> None:
     later verdicts come from one function, so they cannot contradict each other.
     """
     for r in _load(str(sample_log)):
-        allowed, reason = evaluate_policy(r["zone"], r["operation"], r["actor_role"], r["is_owner"])
+        allowed, reason = evaluate_policy(
+            r["zone"], r["operation"], r["actor_role"], r["is_owner"],
+            actor=r["actor"], path=r["path"],
+        )
         if r["success"]:
             assert allowed, f"a denied action was recorded as success: {r} ({reason})"
+
+
+def test_cross_user_work_mkdir_is_never_recorded_as_success(sample_log: Path) -> None:
+    """The signal the demo exists to surface: writing into another user's work area must fail.
+
+    A mkdir under work/<someone-else> is exactly the over-privilege attempt the report is meant
+    to flag, so it may never be generated as a success and quietly drop out of the failure set.
+    """
+    cross_user = [
+        r for r in _load(str(sample_log))
+        if r["zone"] == "work" and r["operation"] == "mkdir" and not r["is_owner"]
+    ]
+    assert cross_user, "the sample data should contain cross-user mkdir attempts to reason about"
+    for r in cross_user:
+        assert owner_of_path(r["path"]) != r["actor"], "is_owner=False contradicts the path's owner"
+        assert not r["success"], f"a mkdir into another user's work area succeeded: {r}"
 
 
 def test_classify_failures_matches_independent_count(sample_log: Path) -> None:
@@ -189,7 +318,10 @@ def test_classify_failures_matches_independent_count(sample_log: Path) -> None:
     expected_violations = sum(
         1
         for r in rows
-        if not evaluate_policy(r["zone"], r["operation"], r["actor_role"], r["is_owner"])[0]
+        if not evaluate_policy(
+            r["zone"], r["operation"], r["actor_role"], r["is_owner"],
+            actor=r["actor"], path=r["path"],
+        )[0]
     )
     out = classify_failures.invoke({"log_path": str(sample_log)})
     m = re.search(r"violations:\s*(\d+)", out)

@@ -1,0 +1,19 @@
+# Keep the build context small and secret-free.
+.git
+.gitignore
+.venv
+venv
+__pycache__
+**/__pycache__
+*.pyc
+.pytest_cache
+tests
+cli/node_modules
+cli/dist
+deploy
+report.md
+data/sample_audit_logs.jsonl
+.env
+.env.example
+setup.log
+*.md

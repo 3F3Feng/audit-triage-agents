@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: audit-triage
+  namespace: audit-triage
+  labels:
+    app: audit-triage
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: audit-triage
+  template:
+    metadata:
+      labels:
+        app: audit-triage
+    spec:
+      serviceAccountName: audit-triage-sa
+      automountServiceAccountToken: false      # belt-and-suspenders with the SA setting
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: server
+          image: audit-triage:local
+          imagePullPolicy: IfNotPresent          # image is side-loaded via `kind load`
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: audit-triage-config
+            - secretRef:
+                name: audit-triage-secret
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            # readOnlyRootFilesystem is left false because the app writes report.md and some
+            # libraries need a writable tmp/cache. Turning it on is a documented hardening step
+            # (needs emptyDir mounts for /tmp and the report dir) — see deploy/README.md.
+            readOnlyRootFilesystem: false
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"

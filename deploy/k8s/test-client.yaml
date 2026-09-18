@@ -1,0 +1,50 @@
+# Two probe pods to demonstrate the NetworkPolicy whitelist.
+#   allowed-client  carries role=triage-client  -> can reach the server on :8000
+#   denied-client   does not                      -> blocked by default-deny
+# Both are restricted-PSS compliant so they schedule in this namespace.
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: allowed-client
+  namespace: audit-triage
+  labels:
+    role: triage-client
+spec:
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: curl
+      image: curlimages/curl:8.11.1
+      command: ["sleep", "3600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: denied-client
+  namespace: audit-triage
+  labels:
+    role: other
+spec:
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: curl
+      image: curlimages/curl:8.11.1
+      command: ["sleep", "3600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
