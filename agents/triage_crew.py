@@ -14,6 +14,7 @@ from crewai import LLM, Agent, Crew, Process, Task
 from crewai.tools.base_tool import Tool as CrewTool
 from dotenv import load_dotenv
 
+from tools import actor_assessment
 from tools.audit_tools import ALL_TOOLS
 
 
@@ -28,6 +29,7 @@ from tools.audit_tools import ALL_TOOLS
 # framework-agnostic and unit-testable.
 CREW_TOOLS: list[CrewTool] = [CrewTool.from_langchain(t) for t in ALL_TOOLS]
 CREW_TOOL_BY_NAME: dict[str, CrewTool] = {t.name: t for t in CREW_TOOLS}
+ASSESS_TOOL = CrewTool.from_langchain(actor_assessment.assess_actor_intent)
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -82,6 +84,8 @@ def build_crew(log_path: str) -> Crew:
             CREW_TOOL_BY_NAME["classify_failures"],
             CREW_TOOL_BY_NAME["check_policy"],
             CREW_TOOL_BY_NAME["get_policy_summary"],
+            # Only offered when a key is set, so the crew never burns a turn on a dead tool.
+            *([ASSESS_TOOL] if actor_assessment.is_configured() else []),
         ],
         llm=llm,
         verbose=True,
@@ -126,7 +130,13 @@ def build_crew(log_path: str) -> Crew:
             "never guessing whether someone is an admin or an owner;\n"
             "4) Rank the actors by risk (violations first, then operation sensitivity like "
             "chown/chmod/delete), and explain the ranking criteria.\n"
-            "Never invent anything: every finding must cite its evidence (actor, role, operation, "
+            + (
+                f"5) Call assess_actor_intent(log_path='{log_path}') for a typed per-actor judgment "
+                "of intent and concern. Report its label, probability and action alongside your own "
+                "ranking, and say plainly where the two disagree.\n"
+                if actor_assessment.is_configured() else ""
+            )
+            + "Never invent anything: every finding must cite its evidence (actor, role, operation, "
             "path, count). Keep VIOLATION (policy forbids it) strictly separate from "
             "PERMISSION_ERROR (policy allows it, it failed for another reason)."
         ),
