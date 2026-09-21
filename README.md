@@ -43,34 +43,13 @@ Two outputs, at two speeds:
 
 ## Architecture
 
-```
-   ┌──────────────┐   HTTP    ┌─────────────────────────────────────────────────┐
-   │ TypeScript   │ ────────▶ │  FastAPI  (server.py)                            │
-   │ CLI (cli/)   │           │   /health   /policies                            │
-   │ native fetch │ ◀──────── │   /events/summary    ← deterministic, no model   │
-   └──────────────┘   JSON    │   /actors/assessment ← Jev typed judgments, ~1s  │
-                              │   /triage            ← kicks off the crew, ~60s+ │
-                              └────────────────────────┬────────────────────────┘
-      audit events JSONL ──────────────────────────────┤
-                                                       ▼
-                   ┌──────────────────────────────────────────────────────────┐
-                   │  Deterministic code: decides the FACTS                    │
-                   │  tools/policy.py  → VIOLATION vs PERMISSION_ERROR per event│
-                   │  LangChain tools  → counts, groupings, org baseline rate   │
-                   └───────────────┬───────────────────────────┬──────────────┘
-                                   │ facts as state            │ tool calls
-                   ┌───────────────▼──────────────┐ ┌──────────▼─────────────────┐
-                   │ TypeSafe Jev: JUDGMENTS       │ │ CrewAI crew: SYNTHESIS      │
-                   │ per actor, typed + probability│ │ ① Event Summarizer          │
-                   │ · why?  Choice (4 options)    │─▶ ② Policy Analyst ◀─ can call│
-                   │ · how concerning? Score 0–3   │ │    Jev as a tool, reports   │
-                   └───────────────┬──────────────┘ │    where it disagrees       │
-                   ┌───────────────▼──────────────┐ │ ③ Report Writer             │
-                   │ Code thresholds: ACTION       │ └──────────┬─────────────────┘
-                   │ escalate / follow_up / note / │            ▼
-                   │ human_review (low confidence) │        report.md
-                   └──────────────────────────────┘
-```
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/architecture-dark.svg">
+    <img src="docs/architecture-light.svg" width="920"
+         alt="Architecture: the TypeScript CLI calls FastAPI, whose /actors/assessment and /triage endpoints both rest on a deterministic facts layer (tools/policy.py verdicts plus the LangChain tool layer's counts, violation_rate and org_baseline). From there a fast TypeSafe Jev lane turns those facts into a typed Choice and Score per actor, which decide_action() in code maps to escalate, follow_up, note or human_review; in parallel the CrewAI crew (Event Summarizer, Policy Analyst, Report Writer) produces report.md, and the Policy Analyst can call Jev as a tool.">
+  </picture>
+</p>
 
 **Design point 1:** keep **deterministic work** (aggregation, matching, counting) in Python tools and give the LLM only **reasoning and synthesis**. That is the whole trick to using multi-agent setups in the right place.
 **Design point 2:** a model call is only as trustworthy as the question it's asked. Code decides facts, Jev answers narrow typed questions about *meaning*, and code decides the action — see [How Jev improved the architecture](#how-jev-improved-the-architecture).
