@@ -18,7 +18,10 @@ from typing import Any
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from typesafe_sdk import TypeSafeError
+
 from agents.triage_crew import DEFAULT_BASE_URL, DEFAULT_MODEL, build_crew
+from tools import actor_assessment
 from tools.audit_tools import AuditLogError, _load, time_window
 
 REPO = Path(__file__).resolve().parent
@@ -81,6 +84,7 @@ def health() -> dict[str, Any]:
         "status": "ok",
         "model": DEFAULT_MODEL,
         "base_url": DEFAULT_BASE_URL,
+        "typesafe_configured": actor_assessment.is_configured(),
         "repo": str(REPO),
     }
 
@@ -97,6 +101,28 @@ def events_summary(logs: str = "data/sample_audit_logs.jsonl") -> dict[str, Any]
     if not log_path.exists():
         raise HTTPException(status_code=404, detail=f"log not found: {log_path}")
     return _stats_or_400(log_path)
+
+
+@app.get("/actors/assessment")
+def actors_assessment(logs: str = "data/sample_audit_logs.jsonl", top_n: int = 5) -> dict[str, Any]:
+    """Typed per-actor intent + concern from TypeSafe, with the recommended action from code thresholds.
+
+    Sub-second, so it can gate the minute-long crew rather than follow it.
+    """
+    log_path = _resolve(logs)
+    if not log_path.exists():
+        raise HTTPException(status_code=404, detail=f"log not found: {log_path}")
+    if not 1 <= top_n <= 50:
+        raise HTTPException(status_code=400, detail="top_n must be between 1 and 50")
+    _stats_or_400(log_path)  # validate before spending a model call
+    started = time.perf_counter()
+    try:
+        actors = actor_assessment.assess_actors(str(log_path), top_n)
+    except actor_assessment.AssessmentUnavailable as exc:
+        raise HTTPException(status_code=503, detail=f"TypeSafe not configured: {exc}") from exc
+    except TypeSafeError as exc:
+        raise HTTPException(status_code=502, detail=f"TypeSafe call failed: {exc}") from exc
+    return {"actors": actors, "elapsed_seconds": round(time.perf_counter() - started, 2)}
 
 
 @app.post("/triage", response_model=TriageResponse)

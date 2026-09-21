@@ -37,6 +37,7 @@ secret:
 	kubectl apply -f k8s/namespace.yaml
 	kubectl -n $(NS) create secret generic audit-triage-secret \
 	  --from-literal=TRIAGE_API_KEY="$(TRIAGE_API_KEY)" \
+	  --from-literal=TYPESAFE_API_KEY="$(TYPESAFE_API_KEY)" \
 	  --dry-run=client -o yaml | kubectl apply -f -
 
 # Apply everything (namespace first so PSS labels exist before pods are admitted).

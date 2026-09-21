@@ -4,6 +4,7 @@
 langchain-core>=0.3
 crewai>=0.80
 pydantic>=2.7
+typesafe-sdk>=0.7   # per-actor intent judgments (tools/actor_assessment.py); optional at runtime
 python-dotenv>=1.0   # triage_crew loads .env explicitly; don't rely on it arriving transitively
 
 # 服务层（把 crew 暴露成一个可被外部触发的 HTTP 端点）
