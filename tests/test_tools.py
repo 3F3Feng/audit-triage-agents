@@ -209,7 +209,29 @@ def test_group_by_actor_totals_are_consistent(sample_log: Path) -> None:
     fails = [r for r in rows if not r.get("success")]
     expected = Counter(r["actor"] for r in fails).most_common(1)[0][0]
     out = group_by_actor.invoke({"log_path": str(sample_log), "only_failures": True})
-    assert expected in out.splitlines()[0], "the actor with the most failures should be listed first"
+    assert expected in out.splitlines()[1], "the actor with the most failures should be listed first"
+
+
+def test_group_by_actor_total_counts_every_event(tmp_path: Path) -> None:
+    """only_failures must not shrink the denominator: 1 failure out of 3 events reads "1 / 3"."""
+    base = {"operation": "create", "actor_role": "artist", "zone": "work",
+            "path": "/studio/film/devrnd/sequence/SHOWA/work/a/scene", "is_owner": True}
+    rows = [
+        {**base, "ts": "2026-01-01T00:00:00Z", "actor": "a", "success": False},
+        {**base, "ts": "2026-01-01T00:01:00Z", "actor": "a", "success": True},
+        {**base, "ts": "2026-01-01T00:02:00Z", "actor": "a", "success": True, "zone": "product"},
+        {**base, "ts": "2026-01-01T00:03:00Z", "actor": "clean", "success": True},
+    ]
+    log = tmp_path / "log.jsonl"
+    log.write_text("".join(json.dumps(r) + "\n" for r in rows))
+
+    out = group_by_actor.invoke({"log_path": str(log), "only_failures": True})
+    assert "failures   1 / total   3 (33.3%)" in out
+    assert "clean" not in out, "actors that never failed are dropped when only_failures"
+    assert "product" not in out, "the zone breakdown covers failed events only"
+
+    everything = group_by_actor.invoke({"log_path": str(log), "only_failures": False})
+    assert "clean" in everything and "'product': 1" in everything
 
 
 @pytest.mark.parametrize(

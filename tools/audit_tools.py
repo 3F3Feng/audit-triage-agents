@@ -109,24 +109,33 @@ def list_failures(log_path: str, limit: int = 30) -> str:
 
 @tool
 def group_by_actor(log_path: str, only_failures: bool = True) -> str:
-    """Aggregate by actor: operations, failures, failure rate and the zones each actor touched."""
+    """Aggregate by actor: failures out of ALL their events, failure rate, and the zones/ops touched.
+
+    ``total`` always counts every event the actor made, so ``failures / total`` is a real rate.
+    ``only_failures`` narrows the zone/op breakdown to failed events and drops actors that never
+    failed; it never shrinks the denominator.
+    """
     rows = _load(log_path)
     stats: dict[str, dict[str, Any]] = {}
     for r in rows:
-        if only_failures and r.get("success"):
-            continue
         s = stats.setdefault(
             r["actor"],
             {"role": r.get("actor_role", "?"), "total": 0, "fail": 0, "zones": Counter(), "ops": Counter()},
         )
         s["total"] += 1
-        s["fail"] += 0 if r.get("success") else 1
-        s["zones"][r["zone"]] += 1
-        s["ops"][r["operation"]] += 1
-    lines = []
+        failed = not r.get("success")
+        s["fail"] += failed
+        if failed or not only_failures:
+            s["zones"][r["zone"]] += 1
+            s["ops"][r["operation"]] += 1
+    if only_failures:
+        stats = {a: s for a, s in stats.items() if s["fail"]}
+    breakdown = "failed events" if only_failures else "all events"
+    lines = [f"per-actor failures / all events (zones and ops count {breakdown}):"] if stats else []
     for actor, s in sorted(stats.items(), key=lambda kv: -kv[1]["fail"]):
         lines.append(
-            f"{actor:<18} [{s['role']:<13}] failures {s['fail']:>3} / total {s['total']:>3} | "
+            f"{actor:<18} [{s['role']:<13}] failures {s['fail']:>3} / total {s['total']:>3} "
+            f"({s['fail'] / s['total']:.1%}) | "
             f"zones {dict(s['zones'])} | ops {dict(s['ops'].most_common(3))}"
         )
     return "\n".join(lines) or "No matching records."

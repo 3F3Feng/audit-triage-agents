@@ -4,6 +4,10 @@
 > events). The crew took 100s; the same actor ranking from `GET /actors/assessment` alone took 1.1s.
 > Model output varies run to run; the tool figures do not. §3.3 is where the crew reconciles Jev's
 > typed judgments against the deterministic counts.
+>
+> The "degenerate Total column" the crew flags in §2.2 (and limitation 4) was a real `group_by_actor`
+> bug, fixed right after this run: `total` now counts every event, and the tool prints the failure
+> rate the crew had to derive by hand here (its derived rates match the fixed output exactly).
 
 # Authorization-Failure Audit Review — sample_audit_logs.jsonl
 
