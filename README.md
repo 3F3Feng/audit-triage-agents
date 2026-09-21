@@ -1,6 +1,6 @@
 # audit-triage-agents
 
-> A multi-agent audit-triage prototype: **LangChain (tool layer) + CrewAI (agent orchestration) + FastAPI (service layer) + a TypeScript CLI (client)**.
+> A multi-agent audit-triage prototype: **LangChain (tool layer) + CrewAI (agent orchestration) + TypeSafe Jev (typed judgments) + FastAPI (service layer) + a TypeScript CLI (client)**.
 >
 > Purpose: explore what it takes to put LLM agents behind a real service boundary using mainstream frameworks — LangChain tools for the deterministic work, CrewAI roles for the reasoning.
 
@@ -33,37 +33,78 @@ Output: a Markdown report containing an event overview, a suspicious-behaviour a
 ## Architecture
 
 ```
-   ┌──────────────┐   HTTP    ┌──────────────────────────────────────────┐
-   │ TypeScript   │ ────────▶ │  FastAPI  (server.py)                     │
-   │ CLI (cli/)   │           │   /health   /policies                     │
-   │ native fetch │ ◀──────── │   /events/summary  ← deterministic, no LLM │
-   └──────────────┘   JSON    │   /triage          ← kicks off the crew    │
-                              └───────────────────┬──────────────────────┘
-                                                  │
-      audit events JSONL ─────────────────────────┼──────────────┐
-                                                  ▼              │
-                              ┌───────────────────────────────┐  │
-                              │  LangChain Tools (determinism) │◀─┘
-                              │  · summarize_events           │
-                              │  · list_failures              │
-                              │  · group_by_actor             │
-                              │  · check_policy               │
-                              │  · classify_failures          │
-                              │  · get_policy_summary         │
-                              └──────────────┬────────────────┘
-                                             │ tool calls
-                              ┌──────────────▼────────────────┐
-                              │      CrewAI Crew (reasoning)   │
-                              │  ① Event Summarizer  ← gathers │
-                              │  ② Policy Analyst    ← decides │
-                              │  ③ Report Writer     ← renders │
-                              └──────────────┬────────────────┘
-                                             ▼
-                                      report.md
+   ┌──────────────┐   HTTP    ┌─────────────────────────────────────────────────┐
+   │ TypeScript   │ ────────▶ │  FastAPI  (server.py)                            │
+   │ CLI (cli/)   │           │   /health   /policies                            │
+   │ native fetch │ ◀──────── │   /events/summary    ← deterministic, no model   │
+   └──────────────┘   JSON    │   /actors/assessment ← Jev typed judgments, ~1s  │
+                              │   /triage            ← kicks off the crew, ~60s+ │
+                              └────────────────────────┬────────────────────────┘
+      audit events JSONL ──────────────────────────────┤
+                                                       ▼
+                   ┌──────────────────────────────────────────────────────────┐
+                   │  Deterministic code: decides the FACTS                    │
+                   │  tools/policy.py  → VIOLATION vs PERMISSION_ERROR per event│
+                   │  LangChain tools  → counts, groupings, org baseline rate   │
+                   └───────────────┬───────────────────────────┬──────────────┘
+                                   │ facts as state            │ tool calls
+                   ┌───────────────▼──────────────┐ ┌──────────▼─────────────────┐
+                   │ TypeSafe Jev: JUDGMENTS       │ │ CrewAI crew: SYNTHESIS      │
+                   │ per actor, typed + probability│ │ ① Event Summarizer          │
+                   │ · why?  Choice (4 options)    │─▶ ② Policy Analyst ◀─ can call│
+                   │ · how concerning? Score 0–3   │ │    Jev as a tool, reports   │
+                   └───────────────┬──────────────┘ │    where it disagrees       │
+                   ┌───────────────▼──────────────┐ │ ③ Report Writer             │
+                   │ Code thresholds: ACTION       │ └──────────┬─────────────────┘
+                   │ escalate / follow_up / note / │            ▼
+                   │ human_review (low confidence) │        report.md
+                   └──────────────────────────────┘
 ```
 
 **Design point 1:** keep **deterministic work** (aggregation, matching, counting) in Python tools and give the LLM only **reasoning and synthesis**. That is the whole trick to using multi-agent setups in the right place.
-**Design point 2:** the crew sits behind an HTTP boundary rather than being called directly from `python run.py`, so it can be triggered by other systems, containerised, and smoke-tested in CI — the line between "agent engineering" and "a notebook demo".
+**Design point 2:** a model call is only as trustworthy as the question it's asked. Code decides facts, Jev answers narrow typed questions about *meaning*, and code decides the action — see [How Jev improved the architecture](#how-jev-improved-the-architecture).
+**Design point 3:** the crew sits behind an HTTP boundary rather than being called directly from `python run.py`, so it can be triggered by other systems, containerised, and smoke-tested in CI — the line between "agent engineering" and "a notebook demo".
+
+## How Jev improved the architecture
+
+[TypeSafe](https://docs.typesafe.ai)'s System One model **Jev** answers questions with typed values
+and calibrated probabilities instead of generated text. Adding it changed where judgment lives.
+
+**Before.** The only model in the system was the CrewAI crew. After `classify_failures` settled the
+facts, the Policy Analyst was asked in prose to "rank the actors by risk" — so the most important
+output of the pipeline (who to escalate) came back as free text inside a Markdown report: not
+testable, not thresholdable, and only available after a ~60–100s, three-agent run.
+
+**After.** The judgment is split into three owners (`tools/actor_assessment.py`):
+
+| Step | Owner | What it produces |
+|---|---|---|
+| Facts | Code (`tools/policy.py`, tools) | Per-event verdict, per-actor counts, violation rate, **org baseline** |
+| Judgment | Jev, one call per actor | `explanation`: Choice of probing / misconfigured_automation / honest_mistake / unclear, with a probability each; `concern`: Score 0–3 |
+| Action | Code (`decide_action`) | `escalate` (≥2.5) / `follow_up` (≥1.5) / `note`, or `human_review` if either answer's confidence < 0.5 |
+
+What that bought, measured on the seeded 400-event dataset (2026-09-20):
+
+| | Crew only (before) | Jev lane (after) |
+|---|---|---|
+| Latency to a ranked, actionable list | 100s (`POST /triage`) | **1.1s** (`GET /actors/assessment`) |
+| Output | Prose in a report | JSON: label, per-option probabilities, score, confidence, action |
+| Where the escalation rule lives | Inside a prompt | Constants in code, unit-tested (`tests/test_actor_assessment.py`) |
+| When the model is unsure | Indistinguishable from sure | Low confidence routes to `human_review` |
+| Can the model get the facts wrong? | It re-reads tool output | No — verdicts arrive as *state*; Jev is never asked them |
+| Tests need a model? | Stubbed crew | Fake client; CI needs no key |
+
+And the crew got **better, not replaced**: when a key is set, the Policy Analyst can call
+`assess_actor_intent` and must report where its own ranking disagrees with Jev's. In the captured run
+([`examples/report.example.md`](examples/report.example.md) §3.3) both put `temp_contractor` first
+(Jev: probing p=0.95, concern 2.66 → escalate), and the crew explicitly overruled Jev on `m.philip`,
+whose 9 failures include 5 *permitted* operations — "the counts win".
+
+**Honest caveats.** On this synthetic data Jev labels every top actor "probing": the generator really
+does make every user write into other users' directories at random, so each looks like boundary-crossing
+in isolation. The org baseline (added so an actor could be compared to "normal") separated the concern
+scores — only `temp_contractor` reaches `escalate` — but did not change the labels. The thresholds are
+starting points to tune on real outcomes, not prompts to tweak until the model agrees.
 
 ## Layout
 
@@ -72,11 +113,14 @@ Output: a Markdown report containing an event overview, a suspicious-behaviour a
 | `tools/audit_tools.py` | LangChain `@tool` layer (deterministic computation, incl. `classify_failures`) |
 | `tools/policy.py` | The one policy engine shared by the tools and the generator (dependency-free) |
 | `agents/triage_crew.py` | CrewAI three-role sequential crew (+ the LangChain→CrewAI tool bridge) |
-| `server.py` | FastAPI service (`/health` `/policies` `/events/summary` `/triage`) |
+| `tools/actor_assessment.py` | Jev per-actor judgments: state builder, typed questions, code-owned action thresholds |
+| `server.py` | FastAPI service (`/health` `/policies` `/events/summary` `/actors/assessment` `/triage`) |
 | `cli/src/index.ts` | TypeScript CLI (zero runtime deps: native `fetch` + `parseArgs`) |
 | `data/generate_sample_logs.py` | Synthetic audit-log generator (seeded, reproducible) |
 | `data/policy_rules.json` | Simplified zone-based authorization policy (redacted rewrite) |
 | `tests/test_tools.py` | pytest suite for the deterministic tool layer (incl. the compliance assertion) |
+| `tests/test_server.py`, `tests/test_actor_assessment.py` | Route contracts and the Jev lane, with stubbed crew / fake TypeSafe client |
+| `examples/report.example.md` | A captured end-to-end crew report, including the Jev reconciliation |
 | `run.py` | Direct entry point that bypasses the service (debugging) |
 
 ## Running
@@ -94,6 +138,8 @@ cp .env.example .env                # .env is gitignored; then edit it and paste
 #   TRIAGE_BASE_URL=https://api.deepseek.com/v1
 #   TRIAGE_API_KEY=sk-...
 #   TRIAGE_MODEL=deepseek-flash
+#   TYPESAFE_API_KEY=...            # optional: enables /actors/assessment + the analyst's Jev tool
+#                                   #   (key from https://console.typesafe.ai/)
 # The server auto-loads .env at startup (an explicit `export TRIAGE_MODEL=...` overrides it).
 
 # 2) Install (a dedicated conda env is recommended)
@@ -112,6 +158,7 @@ uvicorn server:app --port 8000
 # 6) Drive it from the TypeScript CLI
 cd cli && npm install && npm run dev -- health
 npm run dev -- summary
+npm run dev -- assess --top 5       # Jev lane: ~1s, typed per-actor judgments
 npm run dev -- triage --out report.md
 ```
 
@@ -166,6 +213,9 @@ python run.py --logs data/sample_audit_logs.jsonl --out report.md
    itself.
 
 ## Limitations
+
+- **Jev's labels are unvalidated on real data.** Typed output guarantees the interface, not the
+  truth; the thresholds in `tools/actor_assessment.py` need tuning against labelled outcomes.
 
 - **The data is synthetic.** Event distributions and failure patterns are constructed, so nothing
   here extrapolates to a real organisation.

@@ -90,3 +90,11 @@ idempotency fall out of Stage 3's checkpoint store).
 - **Auth on the service** — an API-key/bearer check on `/triage` and its status route.
 - **Pin `requirements.txt`** (`pip freeze`) so a fresh clone is reproducible; unpinned drift is
   what caused the `deepseek-chat` / tool-adapter surprises.
+
+## Follow-up from the Jev lane
+
+`GET /actors/assessment` answers "is anyone worth escalating?" in ~1s, but today it runs
+independently of the crew. The natural next step is to **gate the crew on it**: run the full
+~60–100s triage only when some actor comes back `escalate` or `human_review`, and pass the Jev
+results into the crew's context instead of having the analyst re-fetch them. This fits Stage 1's
+async boundary — the fast lane answers synchronously, the crew becomes the background job.

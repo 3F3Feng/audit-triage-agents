@@ -1,388 +1,373 @@
-# Audit Log Triage and Authorization Policy Report
+> **Captured sample.** One end-to-end run (2026-09-20, commit after `e0cdad5`): `npm run dev -- triage`
+> against the FastAPI service, crew on `deepseek-flash`, `TYPESAFE_API_KEY` set so the policy analyst
+> also called `assess_actor_intent` (Jev). Data: `python data/generate_sample_logs.py` (seed 42, 400
+> events). The crew took 100s; the same actor ranking from `GET /actors/assessment` alone took 1.1s.
+> Model output varies run to run; the tool figures do not. §3.3 is where the crew reconciles Jev's
+> typed judgments against the deterministic counts.
 
-**Synthetic-data prototype notice:** This report is based entirely on synthetic data and is a process prototype. It is not a production security determination, employment decision, or confirmed-incident report.
+# Authorization-Failure Audit Review — sample_audit_logs.jsonl
 
-> ### ⚠ Captured sample — read before quoting any figure below
->
-> This file is a **captured** crew run from the prototype's first commit (`430af5f`), kept as an
-> illustration of the report's shape and reasoning style. It is not regenerated with the code, and two
-> later commits have moved past it:
->
-> - `65811c2` gave `check_policy` a **role** rather than a pre-decided `is_admin` flag, and added
->   `classify_failures` — a tool this run never called.
-> - `e626b8b` tightened `self_bootstrap`: a `work` `mkdir` is now allowed only in the caller's **own**
->   directory. It also rewrote the generator's denial reasons to follow the rule that actually
->   refused, so the string “Path is outside the permitted zone for this caller” is no longer emitted
->   at all.
->
-> **Every count, per-actor total and sampled event below belongs to a dataset the current generator no
-> longer produces.** A denied event skips the generator's sporadic-permission-error roll, so tightening
-> the policy changed how many random draws each event consumes — and with it the whole seeded event
-> stream. `data/sample_audit_logs.jsonl` is a run artefact rather than a committed file, so none of
-> these figures can be reproduced from this repository, and regenerating the narrative would need a
-> live model endpoint.
->
-> What has been done instead: the statements of **policy and tool behaviour** — the reason list in
-> §2.3 and the tables in §3.2 and §3.3 — are hand-corrected against the current code, each one checked
-> by actually running `check_policy`, `classify_failures` and the generator. The **captured figures and
-> the model's own prose are left as they were**; a `†` marks each place (§3.4, §3.5, §3.6, §4.1, §5.3)
-> where a note in italics says what the current code would produce instead. Read the numbers as
-> illustrative, not current.
+> **This report is based on synthetic data and is a process prototype.** The audit file
+> `data/sample_audit_logs.jsonl` is machine-generated
+> sample data; all actor names, roles, paths and show titles are synthetic. No statement in this document
+> is a finding about a real person, a real production system, or a real access-control decision. The
+> purpose of the exercise is to demonstrate an auditable review *process*: tool outputs in, traceable
+> conclusions out. Every figure below is labeled with the tool that produced it, and every claim in
+> §3 is anchored to a specific audit record (actor + timestamp + operation + path).
 
 ---
 
 ## 1. Executive summary
 
-1. **Conclusion first:** The strongest signal is that three actors have documented attempts at admin-gated verbs in the immutable **product** zone: **temp_contractor** (`chmod` sample #9; `chown` sample #8), **m.philip** (`delete` sample #4), and **h.cassidy** (`chown` sample #10). Per `get_policy_summary` / `check_policy`, these are policy violations, not mere technical failures.
-2. **Scale:** Across **400** synthetic events, **50** failed (**12.5%**). **temp_contractor** accounts for **23 of 50** failures and has the widest zone spread. In the **10 most recent** failures returned by `list_failures`, triage is **4 clear violations, 5 mis-clicks/missing permissions, 1 borderline**.
-3. **Action:** Review **temp_contractor**, **m.philip**, and **h.cassidy**; reconcile the **product create/mkdir ALLOW-vs-denied mismatch** for temp_contractor; fix POSIX/group provisioning; tighten product-zone alerting and audit-reason clarity. Full evidence follows.
+1. **Conclusion: the failure volume is real but concentrated, and exactly one actor warrants immediate escalation.**
+   Of 400 events in the window, 72 failed (18.0%, `summarize_events`). The deterministic classifier
+   resolved those 72 into **49 policy violations and 23 permission errors** (`classify_failures`).
+   A single contractor identity, **`temp_contractor`, accounts for 25 of the 49 violations** — 74% of his
+   own failures — and is the **only actor in the log observed attempting every admin-only primitive**
+   (`chown`, `chmod`, `product` modify and delete) *and* writing into another user's profile. Recommended:
+   escalate now.
+
+2. **The second finding is a negative one, and it matters: two of the seven actors are better explained by
+   broken tooling than by intent.** `m.philip` (coordinator) has 9 failures of which **5 are permission
+   errors** — operations the policy actually *permits* (44% violation rate) — and `r.novak`
+   (pipeline_admin) has 3 of 4. The advisory intent model (`assess_actor_intent`, Jev) nevertheless labeled
+   **all seven actors "probing"**, including these two with the lowest violation rates and the lowest
+   probing confidence (p=0.79 for `m.philip`). On the deterministic counts, these two should be triaged as
+   *review the automation*, not *discipline the person*.
+
+3. **The single clearest control gap to tighten is `chown`.** `get_policy_summary` (policy v1.0) makes
+   `chown` admin-only in **all three** zones — `product`, `work` and `user_profile`. Non-admin actors
+   attempted it **8 times inside the 49-violation set** (`temp_contractor` 5, `h.cassidy` 2, `a.chen` 1),
+   including three attempts on the actor's *own* directory where ownership is not in question. That makes it
+   the most repeated admin-only-primitive attempt in the log and the strongest evidence of deliberate
+   probing rather than mis-click.
 
 ---
 
 ## 2. Data overview
 
-### 2.1 Overall shape
+### 2.1 Overall scale — source: `summarize_events`
 
-**Source:** `summarize_events`
+| Metric | Value |
+|---|---|
+| Total events | 400 |
+| Failures | 72 |
+| Failure rate | 18.0% |
+| Window start | 2026-09-20T18:43:43.031546Z |
+| Window end | 2026-09-21T02:42:31.031546Z |
 
-- **Total events:** 400
-- **Failures:** 50 (12.5%)
-- **Time range:** `2026-09-14T22:09:49.366696Z` → `2026-09-15T06:08:37.366696Z`
-
-**Operation mix** — source: `summarize_events`
+**Operation breakdown — source: `summarize_events`**
 
 | Operation | Count |
-|---|---:|
-| create | 186 |
-| mkdir | 109 |
-| modify | 51 |
-| delete | 24 |
-| chmod | 18 |
-| chown | 12 |
+|---|---|
+| create | 174 |
+| mkdir | 122 |
+| modify | 47 |
+| delete | 28 |
+| chmod | 19 |
+| chown | 10 |
 
-**Busiest actors, top 10 returned** — source: `summarize_events`
+**Busiest actors — source: `summarize_events`** (top_n=10 was requested; the tool returned 7 rows)
 
 | Actor | Events |
-|---|---:|
-| temp_contractor | 134 |
-| j.goran | 51 |
-| m.philip | 50 |
-| d.olivares | 46 |
-| a.chen | 44 |
-| r.novak | 44 |
-| h.cassidy | 31 |
+|---|---|
+| temp_contractor | 144 |
+| r.novak | 49 |
+| j.goran | 46 |
+| h.cassidy | 45 |
+| d.olivares | 44 |
+| m.philip | 39 |
+| a.chen | 33 |
 
-*The tool returned 7 actors total in this top-10 list. The sum of these actor counts is 400, matching the reported total.*
+The seven returned rows sum to **400**, i.e. they appear to account for every event in the file; on that
+reading the tool returned all distinct actors rather than truncating at 7. *(This is this report's
+arithmetic inference from `summarize_events`, not a tool assertion.)*
 
----
+### 2.2 Per-actor failure aggregation — source: `group_by_actor` (only_failures=true)
 
-### 2.2 Per-actor aggregation
+| Actor | Role | Failures / Total¹ | Zones (zone: count) | Ops (op: count) |
+|---|---|---|---|---|
+| temp_contractor | contractor | 34 / 34 | user_profile: 5, product: 20, work: 9 | modify: 11, create: 6, chown: 5 |
+| m.philip | coordinator | 9 / 9 | work: 4, product: 4, user_profile: 1 | create: 6, delete: 2, mkdir: 1 |
+| a.chen | artist | 7 / 7 | work: 6, user_profile: 1 | mkdir: 5, chown: 1, modify: 1 |
+| h.cassidy | lighting_td | 7 / 7 | product: 2, work: 5 | create: 3, chown: 2, mkdir: 1 |
+| d.olivares | artist | 6 / 6 | product: 3, user_profile: 1, work: 2 | delete: 2, mkdir: 2, create: 1 |
+| j.goran | artist | 5 / 5 | product: 1, work: 4 | create: 4, chmod: 1 |
+| r.novak | pipeline_admin | 4 / 4 | work: 3, product: 1 | modify: 2, create: 1, mkdir: 1 |
 
-**Source:** `group_by_actor`
+The failure column sums to 34 + 9 + 7 + 7 + 6 + 5 + 4 = **72**, which equals the failure count reported by
+`summarize_events`. The two tools reconcile.
 
-| Actor | Failures / Total | Zones touched | Ops breakdown |
-|---|---:|---|---|
-| temp_contractor | 23 / 134 | product: 51, work: 69, user_profile: 14 | create: 62, mkdir: 33, modify: 18 |
-| m.philip | 10 / 50 | product: 16, work: 27, user_profile: 7 | create: 19, mkdir: 14, modify: 7 |
-| a.chen | 7 / 44 | work: 23, product: 15, user_profile: 6 | create: 22, mkdir: 13, modify: 5 |
-| d.olivares | 5 / 46 | product: 20, work: 23, user_profile: 3 | create: 20, mkdir: 16, modify: 7 |
-| j.goran | 4 / 51 | product: 22, work: 23, user_profile: 6 | create: 30, mkdir: 9, modify: 7 |
-| h.cassidy | 1 / 31 | product: 11, work: 19, user_profile: 1 | create: 12, mkdir: 10, modify: 3 |
-| r.novak | 0 / 44 | work: 31, user_profile: 3, product: 10 | create: 21, mkdir: 14, modify: 4 |
+> ¹ **Ambiguity flag.** The "Total" column is **degenerate**: it equals the failure count in every single
+> row. It therefore cannot be read as "failures out of that actor's total events" — `summarize_events`
+> reports 144 events for `temp_contractor` alone, so "34 / 34" cannot mean 34 failures out of 34 events.
+> No per-actor *event* denominator is available from these two tool calls. Use the counts in the
+> `summarize_events` table (§2.1) if a per-actor denominator is needed.
 
-Failures summed across actors — source: `group_by_actor`:  
-23 + 10 + 7 + 5 + 4 + 1 + 0 = **50**, matching the failure count from `summarize_events`.
+**Derived per-actor failure rate** — computed by this report from §2.1 ÷ §2.2; **not** a direct tool output,
+and subject to the ambiguity above:
 
----
+| Actor | Failures | Events (`summarize_events`) | Derived failure rate |
+|---|---|---|---|
+| temp_contractor | 34 | 144 | 23.6% |
+| m.philip | 9 | 39 | 23.1% |
+| a.chen | 7 | 33 | 21.2% |
+| h.cassidy | 7 | 45 | 15.6% |
+| d.olivares | 6 | 44 | 13.6% |
+| j.goran | 5 | 46 | 10.9% |
+| r.novak | 4 | 49 | 8.2% |
 
-### 2.3 Recent failure sample and reason categories
+**Recent failure sample — source: `list_failures` (limit=10)**
+Tool header: *"72 failed events in total, showing the most recent 10:"*
 
-**Source:** `list_failures`
+| # | Timestamp | Actor | Role | Op | Zone / ownership | Path | Reason |
+|---|---|---|---|---|---|---|---|
+| 1 | 2026-09-21T02:34:07.031546Z | temp_contractor | contractor | mkdir | user_profile non-owner | /studio/users/m.philip/profile | Caller does not own the target path |
+| 2 | 2026-09-21T02:31:43.031546Z | m.philip | coordinator | create | user_profile non-owner | /studio/users/temp_contractor/profile | Caller does not own the target path |
+| 3 | 2026-09-21T02:30:31.031546Z | j.goran | artist | create | work non-owner | /studio/design/devrnd/sequence/SHOWB/work/temp_contractor/scene | Caller does not own the target path |
+| 4 | 2026-09-21T02:29:19.031546Z | temp_contractor | contractor | chown | work owner | /studio/film/devrnd/sequence/SHOWA/work/temp_contractor/scene | Operation chown in zone work requires an admin role |
+| 5 | 2026-09-21T02:25:43.031546Z | temp_contractor | contractor | modify | product non-owner | /studio/television/SHOWC/product/v1/scene | Product area is read-only. Modifications and deletions are not allowed. |
+| 6 | 2026-09-21T02:23:19.031546Z | temp_contractor | contractor | delete | product non-owner | /studio/television/SHOWC/product/v1/scene | Product area is read-only. Modifications and deletions are not allowed. |
+| 7 | 2026-09-21T02:22:07.031546Z | temp_contractor | contractor | modify | work non-owner | /studio/television/devrnd/sequence/SHOWC/work/d.olivares/scene | Caller does not own the target path |
+| 8 | 2026-09-21T02:13:43.031546Z | d.olivares | artist | mkdir | work non-owner | /studio/design/devrnd/sequence/SHOWB/work/j.goran/scene | Caller does not own the target path |
+| 9 | 2026-09-21T02:12:31.031546Z | temp_contractor | contractor | modify | work non-owner | /studio/television/devrnd/sequence/SHOWA/work/d.olivares/scene | Caller does not own the target path |
+| 10 | 2026-09-21T02:10:07.031546Z | m.philip | coordinator | delete | product non-owner | /studio/film/SHOWA/product/v1/scene | Product area is read-only. Modifications and deletions are not allowed. |
 
-- The tool reported **50 failed events in total** and returned the **most recent 10**.
-- The detailed 10-row evidence with policy verdicts is shown in **§3.4**.
-- Distinct failure reasons observed in the sample:
-  - “Caller group not permitted for this zone”
-  - “lack corresponding POSIX write permission bits on the file/folder”
-  - “Caller does not own the target path”
-  - “Product area is read-only. Modifications and deletions are not allowed.”
+**Distinct reason strings in the 10-row sample — source: `list_failures`**
+- "Caller does not own the target path" — rows 1, 2, 3, 7, 8, 9 (**6 of 10**)
+- "Operation chown in zone work requires an admin role" — row 4 (**1 of 10**)
+- "Product area is read-only. Modifications and deletions are not allowed." — rows 5, 6, 10 (**3 of 10**)
 
-> **Corrected against the current generator.** This capture also listed “Path is outside the permitted
-> zone for this caller”. That string is gone: since `e626b8b` a denial is reported by the rule that
-> actually refused it, so an admin-gated operation now reads “Operation `<op>` in zone `<zone>`
-> requires an admin role”. Regenerating at the default seed yields exactly five reason forms — the four
-> above, plus that admin-role form.
+**All 10 sampled rows are VIOLATIONS** under the policy classification in §3.1. This is a 10-row sample of
+72 failures and **must not** be read as "all 72 failures are violations" — 23 of the 72 are not.
 
-No conclusions are drawn in this data-overview section; all figures are attributed to the tool call that produced them.
+### 2.3 Deterministic classification of all 72 failures — source: `classify_failures`
+
+**total failures: 72 | violations: 49 | permission errors: 23** (49 + 23 = 72 ✔)
+
+| Actor | Role | Failures | VIOLATIONS | PERMISSION_ERRORS | Violation rate¹ |
+|---|---|---|---|---|---|
+| temp_contractor | contractor | 34 | **25** | 9 | 74% |
+| d.olivares | artist | 6 | **6** | 0 | **100%** |
+| h.cassidy | lighting_td | 7 | **5** | 2 | 71% |
+| a.chen | artist | 7 | **4** | 3 | 57% |
+| m.philip | coordinator | 9 | **4** | 5 | 44% |
+| j.goran | artist | 5 | **4** | 1 | 80% |
+| r.novak | pipeline_admin | 4 | **1** | 3 | 25% |
+
+Column sums: 25+6+5+4+4+4+1 = **49** violations; 9+0+2+3+5+1+3 = **23** permission errors. The per-actor
+failure totals (34+6+7+7+9+5+4 = 72) reconcile exactly with `group_by_actor` in §2.2.
+
+> ¹ Violation rate = violations ÷ failures, computed by this report from `classify_failures` columns.
+
+### 2.4 Policy baseline — source: `get_policy_summary`
+
+**Policy version 1.0 — admin roles are `devops` and `pipeline_admin` and nobody else.** `coordinator` is
+**not** an admin role.
+
+| Zone | create | modify | delete | chmod | chown | mkdir |
+|---|---|---|---|---|---|---|
+| **product** (deliverable, immutable) | `*` | admin | admin | admin | admin | `*` |
+| **work** (own directory only) | owner | owner | owner | owner | **admin** | owner, self_bootstrap |
+| **user_profile** (strictly isolated) | owner | owner | owner | owner | **admin** | owner |
+
+Policy notes carried verbatim from the tool: *"A non-admin performing modify/delete/chmod/chown in the
+product zone is a clear policy violation, not a mis-click"*; work-zone `mkdir` allows `self_bootstrap`
+(only one's **own** `work/<username>`); every failure must leave an audit record.
+
+**Three classes, kept strictly separate throughout this report:**
+- **VIOLATION** — the policy itself forbids the action (a genuine over-privilege attempt).
+- **PERMISSION_ERROR** — the policy allows the action; it failed for another reason (e.g. POSIX bits). **Not**
+  an over-privilege attempt.
+- **Slip of the finger** — a permitted operation on the wrong path. Strictly a policy violation, but
+  low-intent; flagged separately, never merged into the violation count.
+
+### 2.5 Policy spot-checks — source: `check_policy` (role taken from each event's `actor_role`)
+
+| Case (actor, role, op, zone, owner) | Policy verdict |
+|---|---|
+| temp_contractor, contractor, chown, work, **owner=True** | **DENY** — "chown in zone work requires an admin role (role=contractor, owner=True)" |
+| m.philip, coordinator, delete, product, non-owner | **DENY** — "delete in zone product requires an admin role (role=coordinator)" |
+| r.novak, pipeline_admin, mkdir, work, non-owner (`work/j.goran/scene`) | **DENY** — "mkdir in zone work may only bootstrap one's own directory (the path belongs to j.goran, the caller is r.novak)" |
+| temp_contractor, contractor, mkdir, user_profile, non-owner | **DENY** — "mkdir in zone user_profile requires owner rights (role=contractor, owner=False)" |
+| a.chen, artist, mkdir, work, non-owner (`work/h.cassidy/scene`) | **DENY** — only one's own directory may be bootstrapped |
+| a.chen, artist, mkdir, work, **owner=True** (`work/a.chen`) | **ALLOW** — "the owner may mkdir in zone work" |
+| temp_contractor, contractor, **create**, product, non-owner | **ALLOW** — "zone product permits create for all users" |
+| temp_contractor, contractor, modify, work, **owner=True** | **ALLOW** — "the owner may modify in zone work" |
+| r.novak, **pipeline_admin**, modify, product | **ALLOW** — "an admin role (pipeline_admin) may modify in zone product" |
+| temp_contractor, contractor, chown, user_profile, **owner=True** | **DENY** — "chown in zone user_profile requires an admin role" |
+
+Two things follow directly from this table. First, the violation verdicts in §3.1 are **policy-grounded**,
+not eyeballed. Second, an **ALLOW-but-failed** path demonstrably exists (rows 7 and 8 above): product
+`create` and owner-scoped work writes are permitted, so when they fail they are **PERMISSION_ERRORs**, not
+violations. That is precisely the 23-error bucket in §2.3.
 
 ---
 
 ## 3. Suspicious behaviour
 
-### 3.1 Policy baseline
+### 3.1 Actor-level evidence
 
-**Source:** `get_policy_summary`, policy v1.0
+The `classify_failures` violation list **enumerates all 49 violations** (25+6+5+4+4+4+1 = 49). The table
+below gives, for each actor, the single most serious item from that enumeration and the policy rule it
+breaks. **The timestamp + path + operation triple is the audit-record pointer**; any claim here can be
+re-checked against that record in `sample_audit_logs.jsonl`.
 
-Admin roles: **devops**, **pipeline_admin**.
+| Actor (role) | Action | Evidence — audit record (timestamp / op / path) | Policy basis |
+|---|---|---|---|
+| **temp_contractor** (contractor) — 25 violations | Unauthorized modification and deletion inside an immutable deliverable, plus every admin-only primitive | `02:25:43 modify /studio/television/SHOWC/product/v1/scene`; `02:23:19 delete /studio/television/SHOWC/product/v1/scene`; `01:54:31 chmod /studio/film/SHOWC/product/v1/scene`; `22:25:43 chown /studio/television/SHOWA/product/v1/scene`; `02:34:07 mkdir /studio/users/m.philip/profile` | `product`: modify/delete/chmod/chown are **admin-only**; `check_policy` confirms DENY for a non-admin delete in product ("requires an admin role (role=coordinator)") and the policy states a non-admin modify/delete in product "is a clear policy violation, not a mis-click". `chmod`/`chown` are admin-only in all three zones. `user_profile` mkdir requires owner rights → DENY. |
+| **d.olivares** (artist) — 6 violations, 0 permission errors | Cross-write into a colleague's work directory and into another user's profile | `02:13:43 mkdir /studio/design/devrnd/sequence/SHOWB/work/j.goran/scene`; `19:42:31 mkdir /studio/users/r.novak/profile`; plus `00:31:43 modify` and `20:37:43 delete` on product paths | `work` mkdir is `owner, self_bootstrap` — only one's **own** directory; `check_policy` confirms DENY for "a.chen … work/h.cassidy … may only bootstrap one's own directory". `user_profile` mkdir requires owner rights → DENY. Product modify/delete admin-only. |
+| **h.cassidy** (lighting_td) — 5 violations | Uses the admin-only `chown` primitive twice, including on **his own** directory | `01:23:19 chown /studio/design/devrnd/sequence/SHOWC/work/h.cassidy/scene`; `21:54:31 chown /studio/film/devrnd/sequence/SHOWC/work/h.cassidy/scene`; plus `create`/`modify`/`mkdir` into `a.chen`'s and `d.olivares`' work dirs (`01:31:43`, `22:06:31`, `20:02:55`) | `work` `chown` is **admin**; lighting_td is not an admin. `check_policy` spot-check: "chown in zone work requires an admin role (role=contractor, owner=True)" → **DENY even though owner=True**, so ownership is no defence. |
+| **j.goran** (artist) — 4 violations | Non-admin `chmod` on a product deliverable; repeated work-zone cross-creates | `19:31:43 chmod /studio/film/SHOWC/product/v1/scene`; `02:30:31 create /studio/design/devrnd/sequence/SHOWB/work/temp_contractor/scene`; `21:41:19` and `20:59:19` create into `a.chen`'s and `m.philip`'s work dirs | `product` `chmod` is **admin-only**; artists are not admins → VIOLATION. `work` create is `owner` → DENY for a non-owner path (matches `list_failures` row 3 reason "Caller does not own the target path"). |
+| **a.chen** (artist) — 4 violations, 3 permission errors | `chown` attempt on a colleague's path; mkdir into three other users' work dirs | `21:43:43 chown /studio/television/devrnd/sequence/SHOWA/work/h.cassidy/scene`; `00:26:55`, `19:18:31`, `18:43:43 mkdir` into `h.cassidy`'s, `r.novak`'s and `temp_contractor`'s work dirs | `work` `chown` admin-only → DENY. `work` mkdir permits only `self_bootstrap` (own directory) → DENY. Note `check_policy` confirms **ALLOW** for "a.chen … mkdir … work … owner=True (`work/a.chen`)", i.e. the same operation is legal on his own path. |
+| **m.philip** (coordinator) — 4 violations, **5 permission errors** | Two product `delete`s and a create into another user's profile — but the majority of failures are *permitted* operations | `02:31:43 create /studio/users/temp_contractor/profile`; `02:10:07 delete /studio/film/SHOWA/product/v1/scene`; `23:06:31 delete /studio/design/SHOWB/product/v1/scene` | `user_profile` create requires owner rights → DENY. `product` delete is admin-only; `coordinator` is **not** an admin role (`get_policy_summary`; `check_policy`: "delete in zone product requires an admin role (role=coordinator)") → VIOLATION. Separately, 5 of his 9 failures are ALLOW-but-failed → PERMISSION_ERROR. |
+| **r.novak** (pipeline_admin) — 1 violation, 3 permission errors | One genuine boundary breach: work-zone `mkdir` into another user's directory | `22:19:43 mkdir /studio/design/devrnd/sequence/SHOWC/work/j.goran/scene` | `work` mkdir is `owner, self_bootstrap`; `check_policy` confirms **DENY** — "mkdir in zone work may only bootstrap one's own directory (the path belongs to j.goran, the caller is r.novak)". His product traffic is legal: `check_policy` returns **ALLOW** — "an admin role (pipeline_admin) may modify in zone product". |
 
-| Zone | create | mkdir | modify | delete | chmod | chown |
+### 3.2 Risk ranking (this report's ranking, criteria stated)
+
+Criteria applied in order: (1) violation count; (2) violation *rate* (violations ÷ failures);
+(3) operation sensitivity — `chown`/`chmod`/`delete` > `modify` > `create`/`mkdir`; (4) zone sensitivity
+— `product` (immutable deliverable) > `user_profile` (isolated personal) > `work` (own dir);
+(5) breadth across zones and operations; (6) admin-role amplification.
+
+| Rank | Actor | Role | Viol. / Perm.err | Viol. rate | Rationale |
+|---|---|---|---|---|---|
+| **1** | temp_contractor | contractor | 25 / 9 | 74% | Highest volume *and* highest violation count; the only actor hitting every admin-only primitive (`chown`, `chmod`), product `delete`, *and* another user's profile. |
+| **2** | d.olivares | artist | 6 / 0 | **100%** | Not one benign failure: 2 product deletes, 1 product modify, 1 `user_profile` breach, 2 work cross-writes. |
+| **3** | h.cassidy | lighting_td | 5 / 2 | 71% | Two `chown` attempts on the admin-only primitive; persistent cross-writes into `a.chen`'s and `d.olivares`' work dirs. |
+| **4** | a.chen | artist | 4 / 3 | 57% | 4 violations, but 3 of 7 failures are permission errors; lowest violation rate of the prober group. |
+| **5** | j.goran | artist | 4 / 1 | 80% | A non-admin `chmod` on a product deliverable is a direct immutability attack; volume keeps him mid-table despite the higher rate. |
+| **6** | m.philip | coordinator | 4 / 5 | 44% | Two product deletes are serious, but **more than half his failures are permitted operations** — the profile of misconfigured coordinator tooling. |
+| **7** | r.novak | pipeline_admin | 1 / 3 | 25% | Only genuine violation is one work-zone bootstrap breach; his admin role makes most of his traffic legal, so the low count reflects policy, not restraint alone. |
+
+### 3.3 Advisory intent model — source: `assess_actor_intent` (TypeSafe Jev)
+
+| Actor | Role | fails / viol | Jev label | prob | concern (0–3) | Jev action |
 |---|---|---|---|---|---|---|
-| **product** (delivery, immutable) | `*` | `*` | **admin** | **admin** | **admin** | **admin** |
-| **work** (own dir only) | owner | owner, self_bootstrap | owner | owner | owner | **admin** |
-| **user_profile** (isolated) | owner | owner | owner | owner | owner | **admin** |
+| temp_contractor | contractor | 34 / 25 | **probing** | 0.95 (conf 0.95) | **2.66** (conf 0.66) | **escalate** |
+| d.olivares | artist | 6 / 6 | probing | 0.96 (conf 0.93) | 2.13 (conf 0.78) | follow_up |
+| m.philip | coordinator | 9 / 4 | probing | 0.79 (conf 0.72) | 1.91 (conf 0.72) | follow_up |
+| h.cassidy | lighting_td | 7 / 5 | probing | 0.93 (conf 0.91) | 1.91 (conf 0.78) | follow_up |
+| a.chen | artist | 7 / 4 | probing | 0.92 (conf 0.89) | 1.89 (conf 0.79) | follow_up |
+| j.goran | artist | 5 / 4 | probing | 0.96 (conf 0.94) | 1.82 (conf 0.75) | follow_up |
+| r.novak | pipeline_admin | 4 / 1 | probing | 0.86 (conf 0.81) | 1.59 (conf 0.47) | human_review |
 
-Policy notes:
+Jev's implied order (most concerning first): temp_contractor 2.66 → d.olivares 2.13 → m.philip 1.91 →
+h.cassidy 1.91 → a.chen 1.89 → j.goran 1.82 → r.novak 1.59.
 
-- A **non-admin performing modify/delete/chmod/chown in the product zone is a clear policy violation, not a mis-click.**
-- `work` allows `self_bootstrap`: a user may create their **own** `work/<username>` directory.
-- Every failure must leave an audit record.
-- In the product zone, **create and mkdir are allowed to everyone**; only the four mutating/destructive verbs are admin-gated.
+**Agreements with §3.2.** temp_contractor is #1 in both, and Jev's strongest verdict (probing p=0.95,
+concern 2.66, **escalate**) matches the strongest evidence. r.novak is last in both (concern 1.59,
+`human_review`; §3.2 rank 7). h.cassidy and a.chen are adjacent mid-tier follow-ups in both.
 
----
+**Disagreements, stated plainly.**
+1. **m.philip is the biggest divergence** — Jev ranks him 3rd; §3.2 ranks him 6th. Reason: 5 of his 9
+   failures are permission errors (44% violation rate, the lowest except r.novak). Jev itself flags this:
+   his probing confidence (0.72) is the lowest of all seven. On this actor, **do not escalate** on Jev's
+   score alone.
+2. **Jev labels all seven actors "probing."** That over-calls: 23 of the 72 failures are *permitted*
+   operations. Reserving the label for high violation rates would exclude m.philip (44%) and r.novak (25%),
+   for which "misconfigured automation / unclear" fits the same evidence better.
+3. **Jev's score compresses the top of the field.** d.olivares (100% violation rate) sits only 0.24 above
+   m.philip (44%), because the concern score under-weights violation *rate* and over-weights raw failure
+   count. §3.2's criteria 1–2 separate them.
+4. **Minor:** §3.2 ranks j.goran (80% rate, product `chmod`) above a.chen (57% rate) on volume/sensitivity,
+   while Jev places j.goran last among the six non-admin actors. A non-admin `chmod` on a product
+   deliverable should not be discounted.
 
-### 3.2 `check_policy` results for every (zone, operation) pair seen in failures
-
-**Source:** `check_policy`
-
-| Zone | Operation | role | is_owner | Target path | Result | Reason |
-|---|---|---|---|---|---|---|
-| product | create | contractor | false | — | **ALLOW** | zone product permits create for all users |
-| product | mkdir | contractor | false | — | **ALLOW** | zone product permits mkdir for all users |
-| product | modify | contractor | false | — | **DENY** | requires an admin role |
-| product | delete | coordinator | false | — | **DENY** | requires an admin role |
-| product | chmod | contractor | false | — | **DENY** | requires an admin role |
-| product | chown | lighting_td | false | — | **DENY** | requires an admin role |
-| work | create | artist | true | own | ALLOW | the owner may create in zone work |
-| work | mkdir | artist | true | own | ALLOW | the owner may mkdir in zone work |
-| work | modify | artist | true | own | ALLOW | the owner may modify in zone work |
-| work | delete | artist | true | own | ALLOW | the owner may delete in zone work |
-| work | chmod | artist | true | own | ALLOW | the owner may chmod in zone work |
-| work | chown | artist | true | own | **DENY** | requires an admin role |
-| work | create | artist | false | another user’s | **DENY** | requires owner rights |
-| work | mkdir | artist | false | **own** | ALLOW | the caller may bootstrap their own directory |
-| work | mkdir | artist | false | **another user’s** | **DENY** | may only bootstrap one’s own directory |
-| user_profile | create/modify/delete/chmod/mkdir | artist | true | own | ALLOW | the owner may operate in own profile |
-| user_profile | chown | artist | true | own | **DENY** | requires an admin role |
-
-Every pair that appears among the failures has been checked against the live policy.
-
-> **Corrected against the current tool.** Two things changed after this capture. `check_policy` no
-> longer takes an `is_admin` flag — it takes a **role** and derives admin-ness from
-> `policy["admin_roles"]` — so that column is now `role`. And a `work` `mkdir` by a non-owner is no
-> longer an unconditional ALLOW: since `e626b8b`, `self_bootstrap` grants only when the path's owner
-> segment equals the caller, which is why the single row this capture had is now **two** rows with
-> opposite verdicts. Without a caller and a path to compare, `check_policy` denies rather than guesses.
-> Every row above was re-run against the current engine.
-
----
-
-### 3.3 Failure-reason → policy mapping
-
-| Audit reason string | What it means against policy | Category |
-|---|---|---|
-| “Product area is read-only. Modifications and deletions are not allowed.” | Any denial in product — in practice, the admin-gated verbs | **Violation** |
-| “Operation `<op>` in zone `<zone>` requires an admin role” | An admin-gated verb (`work`/`user_profile` `chown`) attempted by a non-admin | **Violation** |
-| “Caller does not own the target path” | Owner-only rule (work/user_profile) hit by a non-owner, **and** a cross-user `work` `mkdir` | **Violation** |
-| “lack corresponding POSIX write permission bits on the file/folder” | A **filesystem** permission gap on an operation the policy allows | **Mis-click / missing permission** * |
-| “Caller group not permitted for this zone” | Group-level provisioning gap on an operation the policy allows | **Mis-click / missing permission** |
-
-\* The two permission-error reasons are only ever attached to an operation the policy **allowed**: the generator reaches for them in the branch after the policy verdict, so no policy-denied event can carry one. Verified by regenerating and re-classifying — zero denied events carry either string.
-
-> **Corrected against the current generator and `classify_failures`.** The row for “Path is outside the
-> permitted zone for this caller” is replaced by the admin-role reason that supersedes it. The
-> ownership row moves from *Borderline / missing permission* to **Violation**: `classify_failures`
-> labels every event carrying that string `VIOLATION`, and since `e626b8b` the string also covers a
-> `work` `mkdir` into someone else's directory, which used to be generated as a success. The
-> “important trap” footnote is likewise corrected — the pairing it warned about (a POSIX reason on an
-> admin-gated product verb) is one the generator has never produced, so **samples #4 and #10 in §3.4
-> are the model's own inference, not captured data**. Judging by operation-versus-zone rather than by
-> the reason string is still the right instinct; `classify_failures` now does exactly that,
-> deterministically.
-
----
-
-### 3.4 Documented suspicious events — actor / action / evidence / policy basis
-
-**Source for events:** `list_failures`. **Source for verdicts:** `check_policy`.
-
-> **The rows below are left exactly as captured** — correcting them would mean inventing events, since
-> the dataset they came from is not reproducible. Four rows are marked `†` because the current code
-> would not produce them as written:
->
-> - **#4, #10** — a policy-denied product verb carrying “lack POSIX write bits”. The generator attaches
->   a permission-error reason only to operations the policy allowed, so these two reason strings were
->   the model's inference rather than the log's text. The generator's actual line for any product-zone
->   denial is “Product area is read-only. Modifications and deletions are not allowed.”
-> - **#8** — same correction: a product-zone `chown` denial reads “Product area is read-only…”, never
->   “Path is outside the permitted zone for this caller”, which `e626b8b` removed outright.
-> - **#6** — a cross-user `work` `mkdir` is now a **DENY**, not `owner/self_bootstrap`, and
->   `classify_failures` labels it `VIOLATION`. The “borderline” reading was a consequence of the bug
->   `e626b8b` fixed. The sample totals below, and the counts that depend on them in §1, §3.6 and §3.7,
->   are left at the captured values rather than silently re-derived.
-
-| # | Actor | Action / Op | Zone | Path | Audit reason | Policy verdict | Triage |
-|---:|---|---|---|---|---|---|---|
-| 1 | temp_contractor | mkdir | product | `/studio/design/SHOWB/product/v1/scene` | Caller group not permitted | ALLOW (`mkdir→*`) | **Mis-click / missing perm** |
-| 2 | temp_contractor | create | product | `/studio/television/SHOWA/product/v1/scene` | Caller group not permitted | ALLOW (`create→*`) | **Mis-click / missing perm** |
-| 3 | m.philip | create | work | `/studio/television/devrnd/sequence/SHOWA/work/m.philip/scene` | lack POSIX write bits | ALLOW (owner) | **Mis-click / missing perm** |
-| 4 † | m.philip | delete | product | `/studio/film/SHOWA/product/v1/scene` | lack POSIX write bits | **DENY (admin only)** | **Clear violation** |
-| 5 | temp_contractor | modify | work | `…/work/temp_contractor/scene` | lack POSIX write bits | ALLOW (owner) | **Mis-click / missing perm** |
-| 6 † | a.chen | mkdir | work | `/studio/design/devrnd/sequence/SHOWA/work/a.chen/scene` | Caller does not own target path | owner/self_bootstrap | **Borderline (owner mismatch)** |
-| 7 | m.philip | delete | work | `…/work/m.philip/scene` | lack POSIX write bits | ALLOW (owner) | **Mis-click / missing perm** |
-| 8 † | temp_contractor | chown | product | `/studio/television/SHOWA/product/v1/scene` | Path outside permitted zone | **DENY (admin only)** | **Clear violation** |
-| 9 | temp_contractor | chmod | product | `/studio/television/SHOWB/product/v1/scene` | Product area is read-only | **DENY (admin only)** | **Clear violation** |
-| 10 † | h.cassidy | chown | product | `/studio/design/SHOWB/product/v1/scene` | lack POSIX write bits | **DENY (admin only)** | **Clear violation** |
-
-**Totals in the documented sample:** **4 clear violations, 5 mis-clicks/missing permissions, 1 borderline.**
-
----
-
-### 3.5 Clear violations of privilege
-
-These are non-admins invoking an **admin-gated verb** in the immutable **product** zone. Per policy notes, these are deliberate policy violations, not mis-clicks.
-
-- **temp_contractor — `chmod` on product** `/studio/television/SHOWB/product/v1/scene`  
-  - Evidence: sample **#9**  
-  - Audit reason: “Product area is read-only. Modifications and deletions are not allowed.”  
-  - Policy basis: product `chmod` requires **admin**.
-
-- **temp_contractor — `chown` on product** `/studio/television/SHOWA/product/v1/scene`  
-  - Evidence: sample **#8** †  
-  - Audit reason: “Path is outside the permitted zone for this caller” — *this string no longer exists; the generator's line for any product-zone denial is “Product area is read-only. Modifications and deletions are not allowed.”*  
-  - Policy basis: product `chown` requires **admin**. (Unchanged, and still the point: the verdict never rested on the reason text.)
-
-- **m.philip — `delete` on product** `/studio/film/SHOWA/product/v1/scene`  
-  - Evidence: sample **#4** †  
-  - Audit reason: “lack POSIX write bits” — *a permission-error reason is only ever attached to an operation the policy allowed, so a denied product `delete` cannot carry this string; see §3.4.*  
-  - Policy basis: product `delete` requires **admin**. The verb itself is admin-only.
-
-- **h.cassidy — `chown` on product** `/studio/design/SHOWB/product/v1/scene`  
-  - Evidence: sample **#10** †  
-  - Audit reason: “lack POSIX write bits” — *same correction as #4.*  
-  - Policy basis: product `chown` requires **admin**.
-
-Structural policy-level violations to watch wherever they occur:
-
-- **`chown` in work / user_profile** — admin-only.
-- **Non-owner writes in work/user_profile** — `DENY: requires owner rights`.
-
----
-
-### 3.6 Mis-clicks / missing permissions
-
-The caller attempted something the policy **would allow**, and it failed for environmental/technical reasons.
-
-- **temp_contractor — `mkdir`/`create` in product** (samples **#1, #2**)  
-  - Policy: `product create→*`, `product mkdir→*`.  
-  - Denied by “Caller group not permitted for this zone.”  
-  - Triage: **access-provisioning gap**, not a privilege breach. This is arguably a policy/tooling inconsistency because `check_policy` says ALLOW while the gateway denied.
-
-- **m.philip — `create`/`delete` in own work dir** (samples **#3, #7**); **temp_contractor — `modify` in own work dir** (sample **#5**)  
-  - All on the caller’s **own** path.  
-  - Policy: ALLOW (owner).  
-  - Failed only on “lack POSIX write permission bits” → **filesystem permissions**, not authorization.
-
-- **a.chen — `mkdir` in work** (sample **#6**) †  
-  - Audit reason: “Caller does not own the target path.”  
-  - **Corrected:** `work mkdir` is allowed for the **owner**, or under `self_bootstrap` for the caller's **own** `work/<username>` directory only. Since `e626b8b` a `mkdir` into another user's directory is a **DENY**, and `classify_failures` labels it `VIOLATION`.  
-  - Triage as captured: **borderline ownership mismatch**, read as a path typo rather than an attempt to seize another user’s area. Under the current policy this reading no longer holds — a cross-user `mkdir` is a violation, not a borderline case. It remains the one work-zone event worth a second look, for the opposite reason.
-
-**Category counts (documented sample):** Clear violations = **4**; Mis-click/missing-permission = **5**; Borderline = **1**.
-
----
-
-### 3.7 Risk ranking of actors
-
-**Criteria, in priority order:**
-
-1. **Severity of the verb attempted** — admin-gated verbs against the **immutable product zone** (`modify`/`delete`/`chmod`/`chown`) rank highest; owner-only violations next; policy-ALLOWED ops that failed technically rank lowest.
-2. **Volume of failures** — more failed attempts = more probes/exposure.
-3. **Breadth of zone access** — actors touching all three zones show wider reach.
-4. **Ownership boundary crossing** — attempts to write outside one’s own directory.
-
-| Rank | Actor | Failures / Total | Product-zone admin-verb violations (evidence) | Zones touched | Verdict |
-|---:|---|---:|---|---|---|
-| **1** | **temp_contractor** | **23 / 134** | **chmod (#9), chown (#8)** — both in product | product 51, work 69, user_profile 14 | Highest risk: most failures **and** two documented admin-only product violations; widest zone spread; recurring pattern (23 fails) |
-| **2** | **m.philip** | **10 / 50** | **delete (#4)** — in product | product 16, work 27, user_profile 7 | Second-highest volume among violators; a destructive delete attempt on a deliverable |
-| **3** | **h.cassidy** | 1 / 31 | **chown (#10)** — in product | product 11, work 19, user_profile 1 | Low volume but single severe event: admin-only chown on a deliverable (ownership change enables further tampering) |
-| **4** | **a.chen** | 7 / 44 | none evidenced | work 23, product 15, user_profile 6 | Ownership-mismatch mkdir in work (#6) = borderline, not escalation; failures mostly missing-permission |
-| **5** | **d.olivares** | 5 / 46 | none evidenced | product 20, work 23, user_profile 3 | No documented admin-verb violation; treated as mis-clicks pending detail |
-| **6** | **j.goran** | 4 / 51 | none evidenced | product 22, work 23, user_profile 6 | Lowest failure count among non-clean actors |
-| **7** | **r.novak** | **0 / 44** | none | work 31, user_profile 3, product 10 | **Lowest risk**: zero failures across all zones |
-
-**Justification for the ordering:**
-
-- Ranks **1–3** are separated from **4–7** by a hard boundary: they **each have at least one documented attempt at an admin-gated verb in the immutable product zone**, which the policy explicitly calls a violation “not a mis-click.”
-- **temp_contractor** (rank 1) outranks **m.philip** (rank 2) because it combines the **largest failure volume (23)** with **two** such violations and the **widest zone footprint**; it is a repeat offender, not a one-off.
-- **m.philip** (rank 2) is above **h.cassidy** (rank 3) on **volume** (10 vs 1) and on the destructive nature of `delete`; **h.cassidy** sits at rank 3 purely on **severity-per-event** (a product `chown`), which outweighs a.chen’s seven low-severity mis-clicks.
-- Ranks **4–6** have **no evidenced privilege violation** in the product zone; their failures match “missing POSIX bits / group not permitted / ownership mismatch,” i.e., the failure mode of an authorized user who simply lacks a bit or fat-fingered a path. **a.chen** leads this group only because of the single borderline `work mkdir` ownership mismatch.
-- **r.novak** (rank 7) is clean: **0/44 failures** is the strongest low-risk signal in the dataset.
+**Reconciliation rule applied in this report:** `classify_failures` is ground truth for *what happened*;
+`assess_actor_intent` is advisory evidence for *why*, reported alongside. Where Jev's label contradicts the
+counts — m.philip — **the counts win**, and this report says so rather than silently adopting Jev's order.
 
 ---
 
 ## 4. Recommended actions
 
-### 4.1 Review
-
-- **Immediate review: temp_contractor, m.philip, h.cassidy.**  
-  - Evidence: documented admin-gated product-zone attempts in samples **#8, #9, #4, #10**.  
-  - Confirm intent, contractor scope, group membership, and whether any successful product-zone mutation occurred outside this sample.
-
-- **Review temp_contractor’s product `create`/`mkdir` denials** (samples **#1, #2**).  
-  - `check_policy` returns ALLOW for `product create` and `product mkdir`, but the gateway denied with “Caller group not permitted.”  
-  - This is a **group-provisioning / policy-enforcement mismatch**, not a privilege violation by the actor, but it should be reconciled urgently because it creates noisy failures and masks real violations.
-
-- **Review a.chen’s work-zone ownership mismatch** (sample **#6**) † as a possible path typo or self-bootstrap edge case. — *Under the current policy this is a plain violation rather than an edge case; see §3.6.*
+### 4.1 Review (incident response)
+- **Escalate now — `temp_contractor`** (25 violations; `chown`, `chmod`, product modify/delete, and an
+  attempt on `m.philip`'s profile at `02:34:07`). Agrees with Jev's `escalate`. Pull the full event trail
+  for this identity, not just the 10-row sample.
+- **Investigate as probing — `d.olivares`** (6/6 violations, including two product deletes and a
+  `user_profile` breach), **`h.cassidy`** (2× work `chown`), **`j.goran`** (product `chmod`).
+- **Review as possible misconfigured automation, not malice — `m.philip`** (5 of 9 failures are permitted
+  operations; check the coordinator's tooling and any service account behind it) and **`r.novak`** (3 of 4
+  failures are permitted; his admin role makes most of his traffic legal). Confirm whether a shared
+  automation job is producing these paths.
+- **Watch — `a.chen`** (4 violations / 3 permission errors: mixed profile; the violations are work-zone
+  boundary crossings plus one `chown`).
 
 ### 4.2 Training
-
-- Train all studio actors on the **product zone rule**: `create`/`mkdir` are broadly allowed, but **`modify`, `delete`, `chmod`, and `chown` are admin-only**. A non-admin attempt is a policy violation, not a mis-click.
-- Clarify **work-zone ownership** and `self_bootstrap`: users may create their own `work/<username>` directory, but cannot act on another user’s path.
-- Explain that “lack POSIX write permission bits” may be technical noise on top of a policy-denied operation. Analysts and actors should not treat that reason string as proof the action was allowed.
+- **Work-zone `self_bootstrap` is being misread as "any work directory."** Six of the ten sampled failures
+  share the reason "Caller does not own the target path", and at least six distinct actors crossed a work
+  or profile boundary. A short, targeted module on *own-directory-only* `mkdir`/`create`/`modify` is the
+  highest-yield training item.
+- **Admin-only primitives need an explicit callout.** `chown` is admin-only in all three zones and
+  `chmod` is admin-only in `product`; both were attempted by non-admins. Train that ownership does not
+  imply the right to change ownership (see the `check_policy` DENY with `owner=True`).
+- **`coordinator` is not an admin role.** One product `delete` came from a coordinator. Make the role
+  matrix from `get_policy_summary` part of onboarding rather than tribal knowledge.
 
 ### 4.3 Tighten policy / controls
-
-- **Tighten product-zone alerting:** page or ticket on any non-admin `modify`/`delete`/`chmod`/`chown` attempt in product, regardless of audit reason string.
-- **Separate audit reason categories:** distinguish *policy deny* from *filesystem/POSIX deny* from *group-provisioning deny*. This would prevent violations like sample **#4** and **#10** from being misread as mere permission-bit failures.
-- **Fix POSIX/group provisioning:** reduce the false failures from “lack POSIX write bits” and “Caller group not permitted” where policy would allow the operation.
-- **Verify every failure leaves an audit record** as required by policy.
-- **Consider a stricter product create/mkdir decision** or update the gateway so its behavior matches `check_policy`. Current mismatch is a control gap: the policy says `*`, but the gateway denies.
-
-### 4.4 Process / prototype improvements
-
-- Re-run triage on the **full 50-failure set**, not only the 10 most recent returned by `list_failures`.
-- Extend `group_by_actor` or add a new tool to return **per-actor, per-operation failure counts**, because the current aggregation gives op mix totals, not per-op failure counts.
-- Add a sampling or export step that preserves all 50 failed events for human review.
+- **`chown`: 8 non-admin attempts inside the 49-violation set** (`temp_contractor` 5, `h.cassidy` 2,
+  `a.chen` 1), including three on the actor's own directory. This is the single most repeated admin-only
+  primitive in the log. Tighten by alerting on *any* non-admin `chown` attempt rather than recording it as
+  a routine failure.
+- **`product` immutability:** consider a hard pre-execution block (not just a post-hoc DENY record) for
+  non-admin `modify`/`delete`/`chmod`/`chown` in the `product` zone, backed by the policy's own statement
+  that this "is a clear policy violation, not a mis-click".
+- **Contractor scoping:** `temp_contractor` produced 144 of 400 events and 25 of 49 violations. Review
+  whether contractor identities should be provisioned with a narrower initial role, and add a
+  volume-plus-violation-rate trigger so a single identity cannot accumulate 34 failures unnoticed.
+- **Permission-error noise:** 23 of 72 failures are permitted operations that failed — a signal about
+  tooling or filesystem state, not about privilege. Separate those alerts from violation alerts so the
+  violation queue is not diluted.
 
 ---
 
 ## 5. Appendix
 
-### 5.1 Tools used
+### 5.1 Tools used, and what each contributed
 
-| Tool | Purpose |
-|---|---|
-| `summarize_events` | Total events, failures, time range, operation mix, busiest actors |
-| `group_by_actor` | Per-actor failures/total, zones touched, operation totals |
-| `list_failures` | Reported 50 failures total; returned 10 most recent failure records |
-| `get_policy_summary` | Policy v1.0 baseline: roles, zones, allowed operations |
-| `check_policy` | Verdicts for each (zone, operation) pair seen among failures |
+| Tool | Role in this report | Output used |
+|---|---|---|
+| `summarize_events` | Scale, operation mix, busiest actors | 400 events / 72 failures / 18.0%; 6 operations; 7 actors |
+| `group_by_actor` (`only_failures=true`) | Per-actor failure, zone and operation aggregation | 7 rows; failure column sums to 72 |
+| `list_failures` (`limit=10`) | Most recent failures with reason strings | 10 of 72 rows; 3 distinct reason strings |
+| `get_policy_summary` | Policy baseline | policy v1.0; admin roles `devops`, `pipeline_admin`; 3-zone permission matrix |
+| `classify_failures` | **Ground truth** deterministic split | 72 → 49 violations / 23 permission errors; enumerated violation list |
+| `check_policy` | Spot-checks that verdicts are policy-grounded | 10 cases (7 DENY, 3 ALLOW) |
+| `assess_actor_intent` | Advisory intent model (Jev), reported alongside — never overriding the counts | 7 actors, all labeled "probing"; concern scores 1.59–2.66 |
 
-`classify_failures` — the deterministic VIOLATION / PERMISSION_ERROR split — did not exist when this run was captured. A current run has it available, and it is the tool that settles the §3.3 and §3.4 questions above without the model having to reason from reason strings.
-
-### 5.2 Data range and source
+### 5.2 Data range and scope
 
 - **Source file:** `data/sample_audit_logs.jsonl`
-- **Time range:** `2026-09-14T22:09:49.366696Z` → `2026-09-15T06:08:37.366696Z`
-- **Total events:** 400
-- **Failures:** 50 (12.5%)
+- **Events:** 400; **failures:** 72; **window:** 2026-09-20T18:43:43.031546Z → 2026-09-21T02:42:31.031546Z
+  (a single overnight run of roughly eight hours, per `summarize_events`).
+- **Entities observed:** 7 actor identities, 3 zones (`product`, `work`, `user_profile`), 6 operations.
+- **Policy version in force:** 1.0 (`get_policy_summary`).
 
 ### 5.3 Limitations
 
-- **Synthetic data and process prototype.** This report is not a production incident report. Actor names are synthetic labels.
-- **Sample limitation:** `list_failures` returned only the **10 most recent** of **50** failures. Therefore the “4 clear / 5 mis-click / 1 borderline” split is exact **for the documented sample**, not necessarily for all 50 failures.
-- **Aggregation limitation:** `group_by_actor` gives **op mix totals, not per-op failure counts**. The per-actor risk ranking uses the documented sample plus aggregate totals and does **not** invent per-actor violation counts beyond what the sample shows.
-- **Reason-text caveat:** “lack corresponding POSIX write permission bits” appears on genuine violations (**#4, #10**). Analysts must judge by the **operation vs the zone policy**, not by the audit reason string alone. — *Corrected: the generator never attaches a permission-error reason to a policy-denied event, so that pairing was the model's inference (see §3.3 and §3.4). The instinct is right, and `classify_failures` now applies it deterministically; the two samples are not evidence for it.*
-- **Flagged inconsistency, not an actor finding:** temp_contractor’s product `create`/`mkdir` denials (**#1, #2**) contradict `check_policy` returning ALLOW for `product create`/`mkdir`. This is a group-provisioning / policy-enforcement mismatch worth configuration review.
-- **No intent determination:** this report identifies policy violations and suspicious patterns; it does not establish motive or actual data exfiltration/damage.
-- **Traceability:** all actor/failure counts are from `group_by_actor`; zone/op totals from `summarize_events`; detailed events from `list_failures`; policy text from `get_policy_summary`; verdicts from `check_policy`.
+1. **Synthetic data; process prototype.** Nothing here is a finding about a real person or system. The
+   deliverable is the *process*, not the conclusion.
+2. **Sample coverage.** `list_failures` returned 10 of 72 failures; the reason-string distribution
+   (6/1/3) describes only those 10 rows and was **not** extrapolated to all 72.
+3. **All 10 sampled rows are violations**, which is consistent with — but does not prove — the 49/23 split.
+   It must not be generalized to "all 72 failures are violations."
+4. **Degenerate "Total" column.** In `group_by_actor`, Failures == Total for all seven actors, so the second
+   column cannot be read as a per-actor event total. The derived failure rates in §2.2 are therefore
+   computed against `summarize_events` counts and are marked as this report's arithmetic, not tool output.
+5. **Actor-set assumption.** The busiest-actor rows sum to 400, which suggests the 7 returned actors are all
+   actors; this report assumes the actor identities in `summarize_events` and `group_by_actor` correspond,
+   since they were separate tool calls.
+6. **Timestamp granularity.** Stage-2's enumerated violation list reported time-of-day only; full ISO
+   timestamps are available for the §2.2 sample rows. Dates were not re-derived for the violation-only
+   records.
+7. **Intent labels are advisory and over-broad.** `assess_actor_intent` assigned the single label "probing"
+   to all seven actors, including the two with the lowest violation rates. Where it contradicts
+   `classify_failures`, this report followed the classifier and said so (§3.3).
+8. **No baseline window.** A single ~8-hour slice cannot distinguish a first occurrence from an established
+   pattern; there is no prior-period comparison.
+9. **No re-derivation.** Violation/permission-error verdicts were taken from `classify_failures` and
+   spot-checked with `check_policy`; this report did not independently re-parse the 49 enumerated records.
+10. **Path-derived zoning.** Zone and ownership are inferred from path strings by the tools; this report
+    relies on that parse and does not re-validate it.

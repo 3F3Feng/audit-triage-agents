@@ -39,6 +39,19 @@ type TriageResponse = {
   report_path: string | null;
 };
 
+type ActorAssessment = {
+  actor: string;
+  role: string;
+  failed_events_total: number;
+  violations: number;
+  permission_errors: number;
+  explanation: { choice: string; confidence: number; probabilities: Record<string, number> };
+  concern: { score: number; confidence: number; level: string };
+  action: "escalate" | "follow_up" | "note" | "human_review";
+};
+
+type AssessmentResponse = { actors: ActorAssessment[]; elapsed_seconds: number };
+
 function die(msg: string, code = 1): never {
   console.error(`${c.red}✗ ${msg}${c.reset}`);
   process.exit(code);
@@ -98,6 +111,29 @@ function printStats(s: Stats): void {
   }
 }
 
+const ACTION_COLOR: Record<ActorAssessment["action"], string> = {
+  escalate: c.red,
+  follow_up: c.yellow,
+  note: c.dim,
+  human_review: c.cyan,
+};
+
+function printAssessment(r: AssessmentResponse): void {
+  console.log(
+    `${c.bold}Per-actor assessment${c.reset} ${c.dim}(Jev typed judgments; action from code thresholds; ${r.elapsed_seconds}s)${c.reset}`,
+  );
+  for (const a of r.actors) {
+    const p = a.explanation.probabilities[a.explanation.choice] ?? 0;
+    console.log(
+      `  ${a.actor.padEnd(18)} ${c.dim}${a.role.padEnd(13)}${c.reset} ` +
+        `viol ${String(a.violations).padStart(3)}  ` +
+        `${a.explanation.choice.padEnd(24)} p=${p.toFixed(2)}  ` +
+        `concern ${a.concern.score.toFixed(2)}/3 ${bar(a.concern.score / 3, 12)}  ` +
+        `${ACTION_COLOR[a.action]}${a.action}${c.reset}`,
+    );
+  }
+}
+
 const HELP = `${c.bold}audit-triage${c.reset} -- drive the multi-agent audit-triage flow
 
 ${c.bold}Usage${c.reset}
@@ -107,6 +143,8 @@ ${c.bold}Commands${c.reset}
   health                     check the service and the model endpoint
   policies                   print the current authorization policy
   summary  [--logs <path>]   deterministic statistics only (no LLM, instant)
+  assess   [--logs <path>]   per-actor intent + concern from Jev (typed, ~1-2s)
+           [--top <n>]       how many top-failing actors to assess (default 5)
   triage   [--logs <path>]   run the full CrewAI flow and print the report
            [--out <file>]    also write a local copy of the report
 
@@ -118,6 +156,7 @@ ${c.bold}Options${c.reset}
 ${c.bold}Examples${c.reset}
   ${c.dim}$${c.reset} npm run dev -- health
   ${c.dim}$${c.reset} npm run dev -- summary --logs data/sample_audit_logs.jsonl
+  ${c.dim}$${c.reset} npm run dev -- assess --top 3
   ${c.dim}$${c.reset} npm run dev -- triage --out report.md
 `;
 
@@ -129,6 +168,7 @@ async function main(): Promise<number> {
       server: { type: "string" },
       logs: { type: "string" },
       out: { type: "string" },
+      top: { type: "string" },
       json: { type: "boolean", default: false },
       help: { type: "boolean", short: "h", default: false },
     },
@@ -143,7 +183,10 @@ async function main(): Promise<number> {
   }
 
   if (cmd === "health") {
-    const h = await request<{ status: string; model: string; base_url: string }>(server, "/health");
+    const h = await request<{ status: string; model: string; base_url: string; typesafe_configured?: boolean }>(
+      server,
+      "/health",
+    );
     if (values.json) {
       console.log(JSON.stringify(h, null, 2));
       return 0;
@@ -151,6 +194,7 @@ async function main(): Promise<number> {
     console.log(`${c.green}✓${c.reset} service up  ${c.dim}${server}${c.reset}`);
     console.log(`  model     ${c.cyan}${h.model}${c.reset}`);
     console.log(`  endpoint  ${h.base_url}`);
+    console.log(`  jev       ${h.typesafe_configured ? `${c.green}configured${c.reset}` : `${c.dim}not configured (TYPESAFE_API_KEY)${c.reset}`}`);
     return 0;
   }
 
@@ -168,6 +212,20 @@ async function main(): Promise<number> {
       return 0;
     }
     printStats(s);
+    return 0;
+  }
+
+  if (cmd === "assess") {
+    const qs = new URLSearchParams();
+    if (values.logs) qs.set("logs", values.logs);
+    if (values.top) qs.set("top_n", values.top);
+    const q = qs.toString();
+    const r = await request<AssessmentResponse>(server, `/actors/assessment${q ? `?${q}` : ""}`);
+    if (values.json) {
+      console.log(JSON.stringify(r, null, 2));
+      return 0;
+    }
+    printAssessment(r);
     return 0;
   }
 
